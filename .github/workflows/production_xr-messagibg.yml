@@ -5,40 +5,37 @@ name: Build and deploy Node.js app to Azure Web App - xr-messagibg
 
 on:
   push:
-    branches: [production]  # or your deployment branch
+    branches:
+      - production  # or your default branch
 
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
 
-    - name: Install server dependencies
-      run: |
-        cd server
-        npm install
+      - name: Install dependencies
+        run: npm install
 
-    - name: Install desktop-app dependencies
-      run: |
-        cd desktop-app
-        npm install
+      - name: List NPM scripts
+        run: npm run
 
-    # 🔥 Remove this block if you don't have a build script
-    # - name: Build app
-    #   run: |
-    #     cd desktop-app
-    #     npm run build
+      # Skip 'npm run build' as you have no build step
 
-    - name: Deploy to Azure Web App
-      uses: azure/webapps-deploy@v2
-      with:
-        app-name: xr-messagibg
-        package: .
-        publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_B13970A649E545C293BE9252353C16B1 }}
+      - name: Zip artifact for deployment
+        run: zip -r release.zip ./*
+
+      - name: Deploy to Azure Web App
+        uses: azure/webapps-deploy@v2
+        with:
+          app-name: xr-messagebg       # 👈 your Azure Web App name
+          slot-name: production        # or staging if you're using deployment slots
+          package: release.zip
+          publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_B13970A649E545C293BE9252353C16B1 }}
