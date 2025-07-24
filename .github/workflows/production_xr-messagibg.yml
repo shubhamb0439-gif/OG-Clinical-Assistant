@@ -3,6 +3,7 @@
 
 name: Build and deploy Node.js app to Azure Web App - xr-messagibg
 
+
 on:
   push:
     branches:
@@ -62,4 +63,4 @@ jobs:
           slot-name: 'Production'
           package: .
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_B13970A649E545C293BE9252353C16B1 }} 
-          start-up-command: 'npx serve -s'  # Explicit startup command
+          start-up-command: 'npx serve -s'  
