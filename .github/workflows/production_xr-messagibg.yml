@@ -14,12 +14,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '20.x'
+          node-version: '22.x'
           cache: 'npm'
 
       - name: Install dependencies
@@ -31,9 +32,8 @@ jobs:
           npm ci
           cd ..
 
-      - name: Build project
+      - name: Build backend and frontend
         run: |
-          npm run build --if-present
           cd backend
           npm run build --if-present
           cd ../frontend
@@ -42,19 +42,11 @@ jobs:
 
       - name: Prepare deployment package
         run: |
-          # Create wwwroot structure Azure expects
-          mkdir -p wwwroot
-          
-          # Copy backend files
-          cp -r backend/* wwwroot/
-          cp -r frontend wwwroot/
-          
-          # Add configuration files
-          cp web.config wwwroot/  # For Windows
-          # Or for Linux: cp .htaccess wwwroot/
-          
-          # Create deployment zip
-          cd wwwroot
+          mkdir -p deploy_folder
+          cp -r backend/* deploy_folder/
+          cp -r frontend/dist/* deploy_folder/  # Adjust if frontend uses `dist/<project-name>`
+          # Optional: Include environment config, server.js, etc.
+          cd deploy_folder
           zip -r ../release.zip .
           cd ..
 
