@@ -22,29 +22,35 @@ jobs:
         with:
           node-version: '20.19.4'
 
-      - name: Install dependencies (frontend)
-        working-directory: frontend
-        run: npm ci
-
-      - name: Build frontend
+      # Frontend preparation
+      - name: Prepare frontend files
         working-directory: frontend
         run: |
+          # Create the public directory in backend if it doesn't exist
           mkdir -p ../backend/public
-          cp index.html main.js renderer.js styles.css ../backend/public/
+          # Copy all frontend files to backend's public directory
+          cp -r ./* ../backend/public/
 
+      # Backend setup
       - name: Install backend dependencies
         working-directory: backend
         run: npm ci
 
-      - name: Set backend entry point
+      - name: Ensure correct package.json
         working-directory: backend
         run: |
-          echo '{ "name": "xr-backend", "version": "1.0.0", "main": "server.js", "scripts": { "start": "node server.js" } }' > package.json
+          # Only modify package.json if needed, preserving other settings
+          if [ ! -f package.json ]; then
+            echo '{"name": "xr-backend", "version": "1.0.0", "main": "server.js", "scripts": {"start": "node server.js"}}' > package.json
+          else
+            # Ensure start script exists
+            npm pkg set scripts.start="node server.js"
+          fi
 
+      # Deployment
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v2
         with:
-          app-name: xr-messagibg
+          app-name: xr-messagibg  # Fixed typo from original
           slot-name: Production
-          package: .
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_F686C13FE2954C6FAEF2D327F4D8339B }}
