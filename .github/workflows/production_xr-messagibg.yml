@@ -1,10 +1,9 @@
-name: Build and deploy Node.js backend to Azure Web App - xr-messagibg
-
+name: Build and Deploy Node.js App to Azure Web App - xr-messagibg
 
 on:
   push:
     branches:
-      - production  # or your branch name
+      - production
   workflow_dispatch:
 
 jobs:
@@ -12,19 +11,32 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Use Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: Install dependencies from root
-        run: npm install  # This installs npm-run-all too
+      - name: Install root dependencies
+        run: npm install
 
-      - name: Build & Start (if needed)
-        run: npm run start  # or npm run build/start depending on your scripts
+      - name: Install backend dependencies
+        working-directory: ./backend
+        run: npm install
+
+      - name: Install frontend dependencies
+        working-directory: ./frontend
+        run: npm install
+
+      - name: Copy frontend build to backend public folder
+        run: |
+          mkdir -p backend/public
+          cp -r frontend/* backend/public/
+
+      - name: Zip backend for deployment
+        run: zip -r app.zip backend
 
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v2
@@ -32,4 +44,4 @@ jobs:
           app-name: xr-messagibg
           slot-name: Production
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_B13970A649E545C293BE9252353C16B1 }}
-          package: .
+          package: app.zip
