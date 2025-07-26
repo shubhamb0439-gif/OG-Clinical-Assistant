@@ -19,21 +19,27 @@ jobs:
         with:
           node-version: '20.19.4'
 
-      # Optional: Install frontend dependencies if assets are needed
+      # Install frontend dependencies
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm install --force
 
-      # Optional: Copy frontend files to backend/public (if served by backend)
+      # Copy frontend assets to backend/public
       - name: Copy frontend assets to backend
         run: |
           mkdir -p backend/public
           cp frontend/index.html frontend/*.js frontend/*.css backend/public/
 
+      # Install backend dependencies (includes npm-run-all)
       - name: Install backend dependencies
         working-directory: backend
         run: npm install --force
 
+      # Debug: Confirm npm-run-all is installed
+      - name: Check npm-run-all existence
+        run: ls backend/node_modules/npm-run-all || echo "npm-run-all missing"
+
+      # Zip backend folder for deployment
       - name: Zip backend for deployment
         working-directory: backend
         run: zip -r ../release.zip .
