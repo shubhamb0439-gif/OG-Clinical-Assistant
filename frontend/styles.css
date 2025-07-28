@@ -1,156 +1,11 @@
-body {
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-  background-color: #f4f7fa;
-  margin: 0;
-  padding: 0;
-  color: #333;
-}
-
-.container {
-  max-width: 960px;
-  margin: 20px auto;
-  padding: 20px;
-  background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
-}
-
-h1 {
-  margin-top: 0;
-  text-align: center;
-  font-size: 28px;
-  color: #2c3e50;
-}
-
-.status-block,
-.form-block,
-.form-row,
-.section {
-  margin-top: 20px;
-}
-
-.status-block {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-#status {
-  font-weight: bold;
-  padding: 4px 12px;
-  border-radius: 8px;
-}
-
-.connecting {
-  background-color: #f1c40f;
-  color: #fff;
-}
-
-.connected {
-  background-color: #2ecc71;
-  color: #fff;
-}
-
-.disconnected {
-  background-color: #e74c3c;
-  color: #fff;
-}
-
-.form-block input {
+.system-message {
+  background-color: #fef5cb;
   padding: 8px;
-  margin-right: 10px;
-  border: 1px solid #ccc;
-  border-radius: 6px;
-  width: 45%;
+  border-left: 4px solid #f1c40f;
+  margin: 5px 0;
+  border-radius: 4px;
+  font-style: italic;
 }
-
-textarea#messageInput {
-  width: 100%;
-  height: 80px;
-  border-radius: 6px;
-  border: 1px solid #ccc;
-  padding: 10px;
-  margin-top: 12px;
-  resize: none;
-}
-
-.form-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.form-row label {
-  display: flex;
-  align-items: center;
-}
-
-.form-row button {
-  padding: 8px 16px;
-  border: none;
-  background-color: #3498db;
-  color: white;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.3s;
-}
-
-.form-row button:hover {
-  background-color: #2980b9;
-}
-
-ul#deviceList {
-  padding-left: 18px;
-}
-
-.message-block {
-  max-height: 300px;
-  overflow-y: auto;
-  background: #f9f9f9;
-  padding: 10px;
-  border: 1px solid #ddd;
-  border-radius: 8px;
-}
-
-.message {
-  border-bottom: 1px solid #ddd;
-  padding: 8px;
-  margin-bottom: 5px;
-  background: #fff;
-  border-radius: 6px;
-}
-
-.message.urgent {
-  border-left: 5px solid #e74c3c;
-  background-color: #fdecea;
-}
-
-.message.normal {
-  border-left: 5px solid #3498db;
-}
-
-.message-header {
-  display: flex;
-  justify-content: space-between;
-  font-size: 13px;
-  margin-bottom: 4px;
-}
-
-.sender-info {
-  font-weight: bold;
-  color: #2c3e50;
-}
-
-.xr-id {
-  margin-left: 10px;
-  font-size: 12px;
-  color: #777;
-}
-
-.message-content {
-  font-size: 15px;
-}
-
 .urgent-badge {
   background-color: #e74c3c;
   color: white;
@@ -160,41 +15,13 @@ ul#deviceList {
   display: inline-block;
   margin-top: 5px;
 }
-
 .recent-message {
   padding: 6px;
   margin-bottom: 5px;
   background: #eef2f5;
   border-radius: 6px;
 }
-
 .recent-message.urgent {
   background-color: #fdecea;
   border-left: 4px solid #e74c3c;
-}
-
-.recent-message-header {
-  display: flex;
-  justify-content: space-between;
-  font-size: 13px;
-  margin-bottom: 3px;
-}
-
-.system-message {
-  background-color: #fef5cb;
-  padding: 8px;
-  border-left: 4px solid #f1c40f;
-  margin: 5px 0;
-  border-radius: 4px;
-  font-style: italic;
-}
-
-#remoteVideo {
-  display: block;
-  margin-top: 10px;
-  max-height: 320px;
-  object-fit: contain;
-  background: #000;
-  border: 2px solid #ccc;
-  border-radius: 6px;
 }

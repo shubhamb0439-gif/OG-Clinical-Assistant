@@ -4,7 +4,7 @@ const path = require('path');
 
 let mainWindow;
 let socket = null;
-const SIGNALING_SERVER_URL = 'wss://xr-messagibg-hmh5f2gjgmesengp.centralindia-01.azurewebsites.net'; // <-- Update to your signaling server URL
+const SIGNALING_SERVER_URL = 'ws://172.16.100.205:8080'; // <-- Update to your signaling server URL
 
 function createWindow() {
   mainWindow = new BrowserWindow({

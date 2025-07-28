@@ -1,6 +1,6 @@
-const { ipcRenderer, shell } = require('electron');
+// XR Messaging System - renderer.js (CLEANED VERSION)
 
-// === DOM Elements ===
+// ==== DOM ELEMENTS ====
 const videoElement = document.getElementById('xrVideo');
 const statusElement = document.getElementById('status');
 const deviceListElement = document.getElementById('deviceList');
@@ -16,165 +16,33 @@ const videoOverlay = document.getElementById('videoOverlay');
 const openEmulatorBtn = document.getElementById('openEmulator');
 const clearMessagesBtn = document.getElementById('clearMessagesBtn');
 
+// ==== GLOBAL STATE ====
 let peerConnection = null;
 let remoteStream = null;
 let clearedMessages = new Set();
 let pendingIceCandidates = [];
 let isStreamActive = false;
-let pendingOperations = [];
 
-// === Helper: Update status badge text and class consistently using Tailwind ===
+// ==== STATUS INDICATOR ====
 function setStatus(status) {
   statusElement.textContent = status;
-
-  // Remove all possible bg colors first
   statusElement.classList.remove('bg-yellow-500', 'bg-green-500', 'bg-red-600');
-
   switch (status.toLowerCase()) {
-    case 'connected':
-      statusElement.classList.add('bg-green-500');
-      break;
-    case 'connecting':
-      statusElement.classList.add('bg-yellow-500');
-      break;
-    case 'disconnected':
-      statusElement.classList.add('bg-red-600');
-      break;
-    default:
-      statusElement.classList.add('bg-yellow-500');
+    case 'connected':    statusElement.classList.add('bg-green-500'); break;
+    case 'connecting':   statusElement.classList.add('bg-yellow-500'); break;
+    case 'disconnected': statusElement.classList.add('bg-red-600'); break;
+    default:             statusElement.classList.add('bg-yellow-500');
   }
 }
 
-// Initialize with "Connecting" status
-setStatus('Connecting');
+// ==== MESSAGING LOGIC ====
 
-// === IPC Handlers ===
-
-ipcRenderer.on('webrtc-offer', async (_, msg) => {
-  console.log('[WebRTC] Received offer', msg);
-  let offer = null;
-  if (msg && msg.type === 'offer' && msg.sdp) {
-    offer = msg;
-  } else if (msg && msg.offer && msg.offer.type === 'offer' && msg.offer.sdp) {
-    offer = msg.offer;
-  } else if (msg && msg.sdp && typeof msg.sdp === 'string') {
-    offer = { type: 'offer', sdp: msg.sdp };
-  } else if (msg && msg.sdp && msg.sdp.type === 'offer' && msg.sdp.sdp) {
-    offer = msg.sdp;
-  }
-  if (offer && offer.type === 'offer' && offer.sdp) {
-    await handleOffer(offer);
-  } else {
-    console.warn('[WebRTC] Invalid offer received', msg);
-  }
-});
-
-ipcRenderer.on('ice-candidate', (_, candidateMsg) => {
-  console.log('[WebRTC] Received ICE candidate', candidateMsg);
-  let candidate = candidateMsg && candidateMsg.candidate ? candidateMsg.candidate : candidateMsg;
-  if (candidate && candidate.candidate) {
-    if (peerConnection) {
-      handleRemoteIceCandidate(candidate);
-    } else {
-      pendingIceCandidates.push(candidate);
-    }
-  } else {
-    console.warn('[WebRTC] Invalid ICE candidate received', candidateMsg);
-  }
-});
-
-ipcRenderer.on('webrtc-answer', (_, msg) => {
-  let answer = null;
-  if (msg && msg.type === 'answer' && msg.sdp) {
-    answer = msg;
-  } else if (msg && msg.sdp && typeof msg.sdp === 'string') {
-    answer = { type: 'answer', sdp: msg.sdp };
-  } else if (msg && msg.answer && msg.answer.type === 'answer' && msg.answer.sdp) {
-    answer = msg.answer;
-  }
-  if (peerConnection && answer && answer.sdp) {
-    peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
-  }
-});
-
-ipcRenderer.on('trigger-start-stream', () => {
-  console.log('[IPC] Start stream triggered');
-  // You might want to trigger UI changes here if needed
-});
-
-ipcRenderer.on('trigger-stop-stream', () => {
-  console.log('[IPC] Stop stream triggered');
-  stopStream();
-});
-
-ipcRenderer.on('connection-status', (_, status) => {
-  setStatus(status);
-});
-
-// === Messaging Logic ===
-ipcRenderer.on('new-message', (_, data) => {
-  let parsedMessage = data;
-  if (data && typeof data.data === 'string') {
-    try {
-      parsedMessage = JSON.parse(data.data);
-    } catch (e) {
-      console.warn('[renderer.js] Failed to parse nested message JSON:', e);
-      parsedMessage = {
-        text: data.data,
-        sender: 'unknown',
-        xrId: 'unknown',
-        timestamp: new Date().toLocaleTimeString(),
-        priority: 'normal'
-      };
-    }
-  }
-  const msg = normalizeMessage(parsedMessage);
-  addMessageToHistory(msg);
-  addToRecentMessages(msg);
-});
-
-ipcRenderer.on('message-cleared', (_, data) => {
-  if (!clearedMessages.has(data.messageId)) {
-    clearedMessages.add(data.messageId);
-    addSystemMessage(`🧹 Messages cleared by ${data.by}`);
-    recentMessagesDiv.innerHTML = '<div class="system-message">Messages cleared</div>';
-  }
-});
-
-ipcRenderer.on('status_report', (_, data) => {
-  addSystemMessage(`📋 Status Report from ${data.from}: ${data.status}`);
-});
-
-ipcRenderer.on('control-command', (_, data) => {
-  if (!data || typeof data.command !== 'string') {
-    console.warn('[CONTROL] Invalid control-command received:', data);
-    return;
-  }
-  handleControlCommand(data.command);
-});
-
-// === Button Actions ===
-openEmulatorBtn.addEventListener('click', () => {
-  ipcRenderer.send('open-emulator');
-  shell.openExternal('http://localhost:3000/display.html');
-});
-
-sendButton.addEventListener('click', sendMessage);
-messageInput.addEventListener('keypress', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendMessage();
-  }
-});
-clearMessagesBtn?.addEventListener('click', clearMessages);
-
-// === Send Message ===
+// Send chat/message
 function sendMessage() {
   const text = messageInput.value.trim();
-  const sender = usernameInput.value.trim() || 'Desktop';
+  const sender = usernameInput.value.trim() || 'Web Browser';
   const xrId = xrIdInput.value.trim() || 'XR-1238';
   const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
   if (text) {
     const message = {
       type: "message",
@@ -184,28 +52,43 @@ function sendMessage() {
       priority: urgentCheckbox.checked ? 'urgent' : 'normal',
       timestamp
     };
-    console.log('[RENDERER] Sending message:', message);
-    ipcRenderer.invoke('send-message', message);
+    socket.send(JSON.stringify(message));
     addMessageToHistory(message);
     addToRecentMessages(message);
     messageInput.value = '';
   }
 }
 
+// Process incoming message from server
+function handleIncomingMessage(data) {
+  const msg = normalizeMessage(data);
+  addMessageToHistory(msg);
+  addToRecentMessages(msg);
+}
+
+// Handle "messages cleared" event
+function handleMessageCleared(data) {
+  if (!clearedMessages.has(data.messageId)) {
+    clearedMessages.add(data.messageId);
+    addSystemMessage(`🧹 Messages cleared by ${data.by}`);
+    recentMessagesDiv.innerHTML = '<div class="system-message">Messages cleared</div>';
+  }
+}
+
+// Normalize message object for display
 function normalizeMessage(message) {
-  if (!message || typeof message !== 'object') return {
-    text: String(message),
-    sender: 'unknown',
-    xrId: 'unknown',
-    timestamp: new Date().toLocaleTimeString(),
-    priority: 'normal'
-  };
-
+  if (!message || typeof message !== 'object') {
+    return {
+      text: String(message),
+      sender: 'unknown',
+      xrId: 'unknown',
+      timestamp: new Date().toLocaleTimeString(),
+      priority: 'normal'
+    };
+  }
   const isUrgent = message.urgent === true ||
-                 message.priority === 'urgent' ||
-                 (message.data && typeof message.data === 'string' &&
-                  message.data.includes('"urgent":true'));
-
+    message.priority === 'urgent' ||
+    (message.data && typeof message.data === 'string' && message.data.includes('"urgent":true'));
   return {
     text: message.text || (message.data || ''),
     sender: message.sender || 'unknown',
@@ -215,6 +98,7 @@ function normalizeMessage(message) {
   };
 }
 
+// Add a message to full message history
 function addMessageToHistory(message) {
   const msg = normalizeMessage(message);
   const el = document.createElement('div');
@@ -234,6 +118,7 @@ function addMessageToHistory(message) {
   messageHistoryDiv.scrollTop = messageHistoryDiv.scrollHeight;
 }
 
+// Add a message to the "recent messages" area
 function addToRecentMessages(message) {
   const msg = normalizeMessage(message);
   const el = document.createElement('div');
@@ -247,11 +132,13 @@ function addToRecentMessages(message) {
     <div class="recent-message-content">${msg.text}</div>
   `;
   recentMessagesDiv.prepend(el);
+  // Limit to 5 recent messages
   if (recentMessagesDiv.children.length > 5) {
     recentMessagesDiv.removeChild(recentMessagesDiv.lastChild);
   }
 }
 
+// Add a system/info message to history
 function addSystemMessage(text) {
   const el = document.createElement('div');
   el.className = 'system-message';
@@ -260,21 +147,33 @@ function addSystemMessage(text) {
   messageHistoryDiv.scrollTop = messageHistoryDiv.scrollHeight;
 }
 
+// Send clear-messages command
 function clearMessages() {
-  const by = usernameInput.value.trim() || 'Desktop';
-  ipcRenderer.invoke('send-message', {
+  const by = usernameInput.value.trim() || 'Web Browser';
+  socket.send(JSON.stringify({
     type: 'clear-messages',
     by
-  });
+  }));
   clearedMessages.clear();
   recentMessagesDiv.innerHTML = '<div class="system-message">Messages cleared</div>';
   addSystemMessage(`🧹 Cleared messages locally by ${by}`);
 }
 
-// === WebRTC Logic ===
+// Render the list of connected devices
+function renderDeviceList(devices = []) {
+  deviceListElement.innerHTML = '';
+  devices.forEach(device => {
+    const li = document.createElement('li');
+    li.textContent = device.name + (device.xrId ? ` (${device.xrId})` : '');
+    deviceListElement.appendChild(li);
+  });
+}
+
+// ==== WEBRTC LOGIC ====
+
+// Create and configure PeerConnection
 function createPeerConnection() {
-  stopStream(); // Ensure clean state before creating new connection
- 
+  stopStream();
   const pc = new RTCPeerConnection({
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
@@ -291,51 +190,49 @@ function createPeerConnection() {
     iceTransportPolicy: 'all'
   });
 
+  // Handle incoming media tracks (video/audio)
   pc.ontrack = (event) => {
     if (!isStreamActive) return;
-
-    console.log('[WebRTC] ontrack event:', event.track.kind);
     if (!remoteStream) {
       remoteStream = new MediaStream();
       videoElement.srcObject = remoteStream;
     }
-
-    // Prevent duplicate tracks
-    const existingTracks = remoteStream.getTracks().filter(t =>
-      t.kind === event.track.kind
-    );
-
-    existingTracks.forEach(t => remoteStream.removeTrack(t));
+    // Remove duplicates (same kind)
+    remoteStream.getTracks().filter(t => t.kind === event.track.kind).forEach(t => remoteStream.removeTrack(t));
     remoteStream.addTrack(event.track);
 
-    videoElement.play().catch(e => {
-      console.error('Video play error:', e);
-    });
+    // Unmute if remote audio present
+    if (remoteStream.getAudioTracks().length > 0) {
+      videoElement.muted = false;
+    }
+    videoElement.play().catch(() => {});
   };
 
+  // Send ICE candidates to server
   pc.onicecandidate = (event) => {
     if (event.candidate) {
-      console.log('[ICE] Candidate:', event.candidate.candidate);
-      ipcRenderer.send('ice-candidate', {
+      socket.send(JSON.stringify({
         type: 'ice-candidate',
+        from: xrIdInput.value.trim() || 'XR-1238',
+        to: 'XR-1234',
         candidate: {
           candidate: event.candidate.candidate,
           sdpMid: event.candidate.sdpMid,
           sdpMLineIndex: event.candidate.sdpMLineIndex
         }
-      });
+      }));
     }
   };
 
+  // Handle ICE connection state
   pc.oniceconnectionstatechange = () => {
-    console.log('[WebRTC] ICE state:', pc.iceConnectionState);
     if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
       stopStream();
     }
   };
 
+  // Handle overall connection state
   pc.onconnectionstatechange = () => {
-    console.log('Connection state:', pc.connectionState);
     if (pc.connectionState === 'connected') {
       setStatus('Connected');
     } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
@@ -348,12 +245,12 @@ function createPeerConnection() {
   return pc;
 }
 
+// Handle WebRTC offer (from Android)
 async function handleOffer(offer) {
   stopStream();
-
   peerConnection = createPeerConnection();
 
-  // Add buffered ICE candidates
+  // Add any pending ICE candidates
   if (pendingIceCandidates.length > 0) {
     for (const cand of pendingIceCandidates) {
       await handleRemoteIceCandidate(cand);
@@ -361,19 +258,25 @@ async function handleOffer(offer) {
     pendingIceCandidates = [];
   }
 
+  // Normalize SDP
   let realOffer = offer;
   if (offer && typeof offer.sdp !== 'string' && offer.sdp && typeof offer.sdp === 'object' && offer.sdp.sdp) {
     realOffer = { type: offer.sdp.type, sdp: offer.sdp.sdp };
   }
 
-  if (realOffer && realOffer.type === 'offer' && typeof realOffer.sdp === 'string') {
+  if (realOffer && (realOffer.type === 'offer' || realOffer.type === 'webrtc-offer') && typeof realOffer.sdp === 'string') {
     try {
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(realOffer));
+      await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: realOffer.sdp }));
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
 
-      ipcRenderer.send('webrtc-answer', { type: 'answer', sdp: peerConnection.localDescription.sdp });
-      console.log('[WebRTC] Sent SDP answer');
+      // Send answer to signaling server
+      socket.send(JSON.stringify({
+        type: 'answer',
+        from: xrIdInput.value.trim() || 'XR-1238',
+        to: 'XR-1234',
+        sdp: peerConnection.localDescription.sdp
+      }));
     } catch (err) {
       console.error('[WebRTC] Error handling offer:', err);
     }
@@ -382,6 +285,7 @@ async function handleOffer(offer) {
   }
 }
 
+// Handle incoming ICE candidate
 async function handleRemoteIceCandidate(candidate) {
   if (peerConnection && candidate && candidate.candidate) {
     try {
@@ -390,83 +294,53 @@ async function handleRemoteIceCandidate(candidate) {
       console.error('[WebRTC] Error adding ICE candidate:', err);
     }
   } else {
-    console.warn('[WebRTC] Ignored invalid ICE candidate', candidate);
+    // Buffer until peerConnection is ready
+    pendingIceCandidates.push(candidate);
   }
 }
 
+// Stop and clean up all media and PeerConnection
 function stopStream() {
-  console.log('[XR] stopStream() called!');
   isStreamActive = false;
-  pendingOperations = [];
-
-  // 1. Immediately blank the video
   if (videoElement) {
     videoElement.pause();
     videoElement.srcObject = null;
     videoElement.removeAttribute('src');
     videoElement.load();
   }
-
-  // 2. Hide overlays and show video
   if (muteBadge) muteBadge.style.display = 'none';
   if (videoOverlay) videoOverlay.style.display = 'none';
 
-  // 3. Close peer connection more thoroughly
   if (peerConnection) {
-    // Close all data channels first
-    if (peerConnection.getDataChannels) {
-      peerConnection.getDataChannels().forEach(channel => {
-        channel.close();
+    if (peerConnection.getTransceivers) {
+      peerConnection.getTransceivers().forEach(transceiver => {
+        try {
+          if (transceiver.stop) transceiver.stop();
+          if (transceiver.sender && transceiver.sender.track) transceiver.sender.track.stop();
+          if (transceiver.receiver && transceiver.receiver.track) transceiver.receiver.track.stop();
+        } catch (e) {}
       });
     }
-
-    // Close all transceivers
-    peerConnection.getTransceivers().forEach(transceiver => {
-      try {
-        if (transceiver.stop) transceiver.stop();
-        if (transceiver.sender && transceiver.sender.track) {
-          transceiver.sender.track.stop();
-        }
-        if (transceiver.receiver && transceiver.receiver.track) {
-          transceiver.receiver.track.stop();
-        }
-      } catch (e) {
-        console.error('Error stopping transceiver:', e);
-      }
-    });
-
-    // Close the connection
-    try { 
-      peerConnection.close(); 
-    } catch (e) {
-      console.error('Error closing peer connection:', e);
-    }
+    try { peerConnection.close(); } catch (e) {}
     peerConnection = null;
   }
 
-  // 4. Stop and remove all tracks more thoroughly
   if (remoteStream) {
     remoteStream.getTracks().forEach(track => {
-      try { 
-        track.stop(); 
-      } catch (e) {
-        console.error('Error stopping track:', e);
-      }
+      try { track.stop(); } catch (e) {}
     });
     remoteStream = null;
   }
 
-  // 5. Final cleanups
   pendingIceCandidates = [];
 }
 
-function handleControlCommand(command) {
-  if (!isStreamActive) {
-    console.warn('[CONTROL] Ignoring command - stream not active:', command);
-    return;
-  }
+// ==== CONTROL COMMANDS (mute, hide video, etc) ====
 
-  switch (command.toLowerCase()) {
+// Handle incoming control commands from server
+function handleControlCommand(command) {
+  if (!isStreamActive) return;
+  switch (command?.toLowerCase?.()) {
     case 'mute':
       setAudioTracksMuted(true);
       if (muteBadge) muteBadge.style.display = 'block';
@@ -484,25 +358,117 @@ function handleControlCommand(command) {
       if (videoElement) videoElement.style.visibility = 'visible';
       break;
     default:
-      console.warn('[CONTROL] Unknown command:', command);
+      // Unknown commands ignored
   }
 }
 
+// Mute or unmute audio tracks on remote stream
 function setAudioTracksMuted(mute) {
   if (remoteStream) {
-    remoteStream.getAudioTracks().forEach(track => {
-      track.enabled = !mute;
-    });
+    remoteStream.getAudioTracks().forEach(track => { track.enabled = !mute; });
+    videoElement.muted = mute;
   }
 }
 
+// Stream health check
 function checkStreamHealth() {
   if (!peerConnection || !isStreamActive) return false;
-  
   const videoTracks = remoteStream?.getVideoTracks() || [];
   const audioTracks = remoteStream?.getAudioTracks() || [];
-  
   return videoTracks.length > 0 && audioTracks.length > 0 &&
-         videoTracks.every(t => t.readyState === 'live') &&
-         audioTracks.every(t => t.readyState === 'live');
+    videoTracks.every(t => t.readyState === 'live') &&
+    audioTracks.every(t => t.readyState === 'live');
 }
+
+// ==== WEBSOCKET SIGNALLING CONNECTION ====
+
+const wsUrl = 'ws://192.168.29.47:8080'; // <== Set your signaling server address here
+let socket = null;
+
+function connectWebSocket() {
+  socket = new WebSocket(wsUrl);
+
+  socket.onopen = () => {
+    setStatus('Connected');
+    socket.send(JSON.stringify({
+      type: 'identification',
+      deviceName: 'Web Browser',
+      xrId: xrIdInput?.value?.trim() || 'XR-1238',
+      platform: 'web'
+    }));
+  };
+
+  socket.onclose = () => {
+    setStatus('Disconnected');
+    setTimeout(connectWebSocket, 2000); // auto-reconnect
+  };
+
+  socket.onerror = () => setStatus('Disconnected');
+
+  socket.onmessage = async (event) => {
+    let data;
+    try { data = JSON.parse(event.data); } catch { data = event.data; }
+    switch (data.type) {
+      case 'offer':
+      case 'webrtc-offer':
+        await handleOffer(data);
+        break;
+      case 'answer':
+      case 'webrtc-answer':
+        if (peerConnection && data.sdp) {
+          await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }));
+        }
+        break;
+      case 'ice-candidate':
+        handleRemoteIceCandidate(data.candidate || data);
+        break;
+      case 'connection-status':
+        setStatus(data.status || 'Connecting');
+        break;
+      case 'new-message':
+        handleIncomingMessage(data);
+        break;
+      case 'device_list':
+        renderDeviceList(data.devices);
+        break;
+      case 'message-cleared':
+        handleMessageCleared(data);
+        break;
+      case 'status_report':
+        addSystemMessage(`📋 Status Report from ${data.from}: ${data.status}`);
+        break;
+      case 'control-command':
+      case 'control_command':
+        handleControlCommand(data.command);
+        break;
+      case 'message_history':
+        (data.messages || []).forEach(handleIncomingMessage);
+        break;
+      default:
+        // Fallback for any raw offer/ICE
+        if (data.sdp && data.type === 'offer') await handleOffer(data);
+        else if (data.sdp && data.type === 'answer') {
+          if (peerConnection) await peerConnection.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }));
+        }
+        else if (data.candidate) handleRemoteIceCandidate(data);
+        else if (data.text && data.sender) handleIncomingMessage(data);
+    }
+  };
+}
+connectWebSocket();
+
+// ==== BUTTON/EVENT HANDLERS ====
+sendButton.addEventListener('click', sendMessage);
+
+messageInput.addEventListener('keypress', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+clearMessagesBtn?.addEventListener('click', clearMessages);
+
+openEmulatorBtn?.addEventListener('click', () => {
+  window.open('http://localhost:3000/display.html', '_blank');
+});

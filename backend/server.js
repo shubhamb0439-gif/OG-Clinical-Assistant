@@ -1,3 +1,5 @@
+// XR Messaging WebRTC + Messaging Signaling Server
+
 const express = require('express');
 const path = require('path');
 const WebSocket = require('ws');
@@ -6,7 +8,8 @@ const PORT = process.env.PORT || 8080;
 
 // --- Express App for HTTP & Health Check ---
 const app = express();
-app.use(express.static(path.join(__dirname, '../frontend'))); // Optional: serve frontend
+const FRONTEND_PATH = path.join(__dirname, '../frontend');
+app.use(express.static(FRONTEND_PATH)); // Serves index.html, renderer.js, etc.
 
 // --- HEALTH CHECK (CRITICAL FOR AZURE) ---
 app.get('/health', (req, res) => {
@@ -17,12 +20,17 @@ app.get('/health', (req, res) => {
   });
 });
 
+// --- SPA fallback: redirect unknown routes to index.html ---
+app.get('*', (req, res) => {
+  res.sendFile(path.join(FRONTEND_PATH, 'index.html'));
+});
+
 // --- Create HTTP server and attach WebSocket ---
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[HTTP+WS] Server running on http://0.0.0.0:${PORT}`);
 });
 
-const wss = new WebSocket.Server({ server }); // <--- attaches to HTTP server!
+const wss = new WebSocket.Server({ server }); // attaches to HTTP server!
 const clients = new Set();
 const messageHistory = [];
 
@@ -104,6 +112,7 @@ wss.on('connection', (ws) => {
 
       // ==== WEBRTC SIGNALING (OFFER/ANSWER/ICE) ====
       case 'offer':
+      case 'webrtc-offer':
         console.log('[WEBRTC] Offer from', from || 'unknown', 'to', to);
         broadcastToTarget({
           type: 'offer',
@@ -114,6 +123,7 @@ wss.on('connection', (ws) => {
         break;
 
       case 'answer':
+      case 'webrtc-answer':
         console.log('[WEBRTC] Answer from', from || 'unknown', 'to', to);
         broadcastToTarget({
           type: 'answer',
@@ -132,6 +142,7 @@ wss.on('connection', (ws) => {
           to
         }, ws);
         break;
+
       // =============================================
 
       case 'control-command':
@@ -195,9 +206,9 @@ function broadcastToTarget(data, sender) {
     let sent = false;
     clients.forEach(c => {
       if (
-        (c.xrId === data.to || c.deviceName === data.to) &&
-        c.readyState === WebSocket.OPEN &&
-        c !== sender
+        (c.xrId === data.to || c.deviceName === data.to)
+        && c.readyState === WebSocket.OPEN
+        && c !== sender
       ) {
         c.send(JSON.stringify(data));
         sent = true;

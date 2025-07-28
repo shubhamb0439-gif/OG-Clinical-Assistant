@@ -1,12 +1,11 @@
 {
-  "name": "xr-messaging-desktop",
+  "name": "xr-messaging-frontend",
   "version": "1.0.0",
-  "main": "main.js",
+  "description": "XR Messaging Web Frontend",
   "scripts": {
-    "start": "electron ."
+    "start": "npx serve ."
   },
-  "dependencies": {
-    "electron": "^28.2.3",
-    "ws": "^8.18.2"
+  "devDependencies": {
+    "serve": "^14.2.0"
   }
 }
