@@ -70,7 +70,7 @@ jobs:
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
-          app-name: 'xr-messagibg'
+          app-name: 'xr-messaging'
           slot-name: 'Production'
           package: release.zip
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_3C2B94ED3D0D467E86BF4F087B6334E4 }}
