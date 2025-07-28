@@ -24,7 +24,7 @@ let allowAutoPlay = false;
 
 // ========== CONFIG =============
 // Change this to your Azure/production server as needed!
-const SIGNALING_SERVER_URL = 'ws://xr-messagibg-hmh5f2gjgmesengp.centralindia-01.azurewebsites.net'
+const SIGNALING_SERVER_URL = 'ws://172.16.100.132:8080'
 // ===============================
 
 // === Helper: Update status badge text and class ===
