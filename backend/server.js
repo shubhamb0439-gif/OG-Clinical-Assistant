@@ -40,9 +40,7 @@ const app = express();
 
 // --- Static File Serving ---
 const staticPaths = [
-  path.join(__dirname, 'public'),       // Primary location (where deployment puts files)
-  path.join(__dirname, '../frontend'),  // Legacy location
-  path.join(__dirname, 'frontend')      // Alternative location
+  path.join(__dirname, 'public')       // Primary location (where deployment puts files)
 ];
 
 let staticPathFound = null;
