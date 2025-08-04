@@ -13,7 +13,7 @@ const muteBadge = document.getElementById('muteBadge');
 const videoOverlay = document.getElementById('videoOverlay');
 const openEmulatorBtn = document.getElementById('openEmulator');
 const clearMessagesBtn = document.getElementById('clearMessagesBtn');
-
+ 
 let ws = null;
 let peerConnection = null;
 let remoteStream = null;
@@ -21,66 +21,84 @@ let clearedMessages = new Set();
 let pendingIceCandidates = [];
 let isStreamActive = false;
 let allowAutoPlay = false;
-
-// ========== CONFIG =============
-// Change this to your Azure/production server as needed!
-const SIGNALING_SERVER_URL = 'wss://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net'
-// ===============================
-
-// === Helper: Update status badge text and class ===
+let reconnectTimeout = null;
+let heartbeatInterval = null;
+ 
+// CONFIG
+// const SIGNALING_SERVER_URL = 'wss://f75ea4e18683.ngrok-free.app';
+const SIGNALING_SERVER_URL = 'wss://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
+ 
 function setStatus(status) {
+  console.log('[STATUS] Updated:', status);
   statusElement.textContent = status;
   statusElement.classList.remove('bg-yellow-500', 'bg-green-500', 'bg-red-600');
   switch (status.toLowerCase()) {
-    case 'connected':
-      statusElement.classList.add('bg-green-500');
-      break;
-    case 'connecting':
-      statusElement.classList.add('bg-yellow-500');
-      break;
-    case 'disconnected':
-      statusElement.classList.add('bg-red-600');
-      break;
-    default:
-      statusElement.classList.add('bg-yellow-500');
+    case 'connected': statusElement.classList.add('bg-green-500'); break;
+    case 'connecting': statusElement.classList.add('bg-yellow-500'); break;
+    case 'disconnected': statusElement.classList.add('bg-red-600'); break;
+    default: statusElement.classList.add('bg-yellow-500');
   }
 }
-
-// ========== WebSocket Setup ==========
+ 
 function connectWebSocket() {
+  console.log('[WS] Connecting to:', SIGNALING_SERVER_URL);
   setStatus('Connecting');
   ws = new WebSocket(SIGNALING_SERVER_URL);
-
+ 
   ws.onopen = () => {
+    console.log('[WS] Connected');
     setStatus('Connected');
-    // Register desktop with ID
-    ws.send(JSON.stringify({ type: "identification", xrId: xrIdInput.value || "XR-1238", deviceName: usernameInput.value || "Desktop" }));
+    ws.send(JSON.stringify({
+      type: "identification",
+      xrId: xrIdInput.value || "XR-1238",
+      deviceName: usernameInput.value || "Desktop"
+    }));
+    if (reconnectTimeout) {
+      clearTimeout(reconnectTimeout);
+      reconnectTimeout = null;
+    }
+    startHeartbeat();
   };
-
-  ws.onclose = () => setStatus('Disconnected');
-  ws.onerror = () => setStatus('Disconnected');
-
+ 
+  ws.onclose = () => {
+    console.warn('[WS] Connection closed');
+    setStatus('Disconnected');
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
+    if (!reconnectTimeout) {
+      reconnectTimeout = setTimeout(connectWebSocket, 2000);
+    }
+  };
+ 
+  ws.onerror = (err) => {
+    console.error('[WS] Error occurred:', err);
+    setStatus('Disconnected');
+    try { ws.close(); } catch {}
+  };
+ 
   ws.onmessage = (event) => {
+    console.log('[WS] Message received:', event.data);
     let data;
     try { data = JSON.parse(event.data); } catch { data = {}; }
     handleSocketMessage(data);
   };
 }
-
-// ========== Socket Message Routing ==========
+ 
+function startHeartbeat() {
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+  heartbeatInterval = setInterval(() => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "ping" }));
+    }
+  }, 25000);
+}
+ 
 function handleSocketMessage(data) {
   if (!data || !data.type) return;
-
+  console.log('[MSG] Handling type:', data.type);
   switch (data.type) {
-    case 'offer':
-      handleOffer(data.sdp ? data : data.offer ? data.offer : data); // Robust SDP support
-      break;
-    case 'ice-candidate':
-      handleRemoteIceCandidate(data.candidate);
-      break;
-    case 'answer':
-      // Should not occur for desktop (we only create answer)
-      break;
+    case 'offer': handleOffer(data.sdp ? data : data.offer ? data.offer : data); break;
+    case 'ice-candidate': handleRemoteIceCandidate(data.candidate); break;
+    case 'answer': break; // desktop only answers
     case 'message':
       const msg = normalizeMessage(data);
       addMessageToHistory(msg);
@@ -93,25 +111,24 @@ function handleSocketMessage(data) {
         recentMessagesDiv.innerHTML = '<div class="system-message">Messages cleared</div>';
       }
       break;
-    case 'device-list':
+    case 'device_list': // SERVER now sends snake_case!
+    case 'device-list': // Just in case
+      console.log('[DEVICES] List received:', data.devices);
       updateDeviceList(data.devices || []);
       break;
     case 'control-command':
+      console.log('[CONTROL] Command received:', data.command);
       handleControlCommand(data.command);
       break;
     default:
-      // Handle status, etc.
       if (data.status) setStatus(data.status);
   }
 }
-
-// ========== WebRTC Setup ==========
+ 
 function createPeerConnection() {
+  console.log('[WebRTC] Creating peer connection');
   stopStream();
- 
-  // Use TURN config injected at runtime by backend
   const turnConfig = window.TURN_CONFIG || {};
- 
   const iceServers = [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
@@ -119,42 +136,34 @@ function createPeerConnection() {
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' }
   ];
- 
-  // Only push TURN config if present
   if (turnConfig.urls && turnConfig.username && turnConfig.credential) {
-    iceServers.push({
-      urls: turnConfig.urls,
-      username: turnConfig.username,
-      credential: turnConfig.credential
-    });
+    iceServers.push({ urls: turnConfig.urls, username: turnConfig.username, credential: turnConfig.credential });
+    console.log('[WebRTC] Using TURN:', turnConfig);
   }
- 
-  const pc = new RTCPeerConnection({
-    iceServers: iceServers,
-    iceTransportPolicy: 'all'
-  });
+  const pc = new RTCPeerConnection({ iceServers, iceTransportPolicy: 'all' });
  
   pc.ontrack = (event) => {
-    console.log('[WebRTC] ontrack event:', event.track.kind, event);
+    console.log('[WebRTC] ontrack:', event.track.kind);
     if (!remoteStream) {
       remoteStream = new MediaStream();
       videoElement.srcObject = remoteStream;
-      videoElement.muted = true; // Autoplay policy
+      videoElement.muted = true;
     }
     if (!remoteStream.getTracks().some(t => t.id === event.track.id)) {
       remoteStream.addTrack(event.track);
     }
     videoElement.play().catch(e => {
-      console.warn('video play error', e);
+      console.warn('[WebRTC] video play error', e);
       showClickToPlayOverlay();
     });
   };
  
   pc.onicecandidate = (event) => {
     if (event.candidate) {
+      console.log('[WebRTC] Local ICE candidate:', event.candidate);
       ws && ws.send(JSON.stringify({
         type: 'ice-candidate',
-        to: "XR-1234",   // Android device ID (must match SignalingClient in app)
+        to: "XR-1234",
         from: xrIdInput.value?.trim() || "XR-1238",
         candidate: event.candidate
       }));
@@ -167,7 +176,7 @@ function createPeerConnection() {
   };
  
   pc.onconnectionstatechange = () => {
-    console.log('[WebRTC] connection state:', pc.connectionState);
+    console.log('[WebRTC] Conn state:', pc.connectionState);
     if (pc.connectionState === 'connected') setStatus('Connected');
     else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
       stopStream();
@@ -178,19 +187,19 @@ function createPeerConnection() {
   isStreamActive = true;
   return pc;
 }
-
+ 
 async function handleOffer(offer) {
   stopStream();
   peerConnection = createPeerConnection();
   console.log('[WebRTC] Received offer:', offer);
-
+ 
   if (pendingIceCandidates.length > 0) {
     for (const cand of pendingIceCandidates) {
       await handleRemoteIceCandidate(cand);
     }
     pendingIceCandidates = [];
   }
-
+ 
   try {
     // Support both {type, sdp} or full RTCSessionDescription object
     const remoteDesc = offer.sdp
@@ -199,7 +208,7 @@ async function handleOffer(offer) {
     await peerConnection.setRemoteDescription(new RTCSessionDescription(remoteDesc));
     const answer = await peerConnection.createAnswer();
     await peerConnection.setLocalDescription(answer);
-
+ 
     ws && ws.send(JSON.stringify({
       type: 'answer',
       to: "XR-1234",
@@ -211,7 +220,7 @@ async function handleOffer(offer) {
     console.error('[WebRTC] Error handling offer:', err);
   }
 }
-
+ 
 async function handleRemoteIceCandidate(candidate) {
   if (peerConnection && candidate && candidate.candidate) {
     try {
@@ -225,7 +234,7 @@ async function handleRemoteIceCandidate(candidate) {
     console.log('[WebRTC] ICE candidate buffered:', candidate);
   }
 }
-
+ 
 function stopStream() {
   isStreamActive = false;
   if (videoElement) {
@@ -246,7 +255,7 @@ function stopStream() {
   }
   pendingIceCandidates = [];
 }
-
+ 
 // ========== Overlay UI for User Gesture to Play Video ==========
 function showClickToPlayOverlay() {
   if (!videoOverlay) return;
@@ -257,24 +266,26 @@ function showClickToPlayOverlay() {
     videoElement.play();
   };
 }
-
+ 
 // ========== Device List ==========
 function updateDeviceList(devices) {
   deviceListElement.innerHTML = '';
   devices.forEach(device => {
+    // Log devices and XR IDs for clarity
+    console.log(`[DEVICE] DeviceName: ${device.name || device.deviceName || '(no name)'}  XR-ID: ${device.xrId || '(no xrId)'}`);
     const li = document.createElement('li');
-    li.textContent = `${device.deviceName || device.xrId} (${device.xrId})`;
+    li.textContent = `${device.name || device.deviceName || device.xrId} (${device.xrId})`;
     deviceListElement.appendChild(li);
   });
 }
-
+ 
 // ========== Messaging/UI Logic ==========
 function sendMessage() {
   const text = messageInput.value.trim();
   const sender = usernameInput.value.trim() || 'Desktop';
   const xrId = xrIdInput.value.trim() || 'XR-1238';
   const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
+ 
   if (text && ws && ws.readyState === WebSocket.OPEN) {
     const message = {
       type: "message",
@@ -290,7 +301,7 @@ function sendMessage() {
     messageInput.value = '';
   }
 }
-
+ 
 // === UPDATED normalizeMessage with stringified JSON support ===
 function normalizeMessage(message) {
   if (!message || typeof message !== 'object') return {
@@ -300,7 +311,7 @@ function normalizeMessage(message) {
     timestamp: new Date().toLocaleTimeString(),
     priority: 'normal'
   };
-
+ 
   // If message.text looks like a JSON object, parse it!
   let parsed = {};
   if (typeof message.text === 'string' && message.text.trim().startsWith('{') && message.text.trim().endsWith('}')) {
@@ -310,7 +321,7 @@ function normalizeMessage(message) {
       // Not JSON, leave as is
     }
   }
-
+ 
   // Merge parsed fields, prefer real message fields first
   const sender = message.sender || parsed.sender || 'unknown';
   const xrId = message.xrId || parsed.xrId || 'unknown';
@@ -322,7 +333,7 @@ function normalizeMessage(message) {
     parsed.priority === 'urgent' ||
     (message.data && typeof message.data === 'string' &&
       message.data.includes('"urgent":true'));
-
+ 
   return {
     text,
     sender,
@@ -331,7 +342,7 @@ function normalizeMessage(message) {
     priority: isUrgent ? 'urgent' : 'normal'
   };
 }
-
+ 
 function addMessageToHistory(message) {
   const msg = normalizeMessage(message);
   const el = document.createElement('div');
@@ -350,7 +361,7 @@ function addMessageToHistory(message) {
   messageHistoryDiv.appendChild(el);
   messageHistoryDiv.scrollTop = messageHistoryDiv.scrollHeight;
 }
-
+ 
 function addToRecentMessages(message) {
   const msg = normalizeMessage(message);
   const el = document.createElement('div');
@@ -368,7 +379,7 @@ function addToRecentMessages(message) {
     recentMessagesDiv.removeChild(recentMessagesDiv.lastChild);
   }
 }
-
+ 
 function addSystemMessage(text) {
   const el = document.createElement('div');
   el.className = 'system-message';
@@ -376,7 +387,7 @@ function addSystemMessage(text) {
   messageHistoryDiv.appendChild(el);
   messageHistoryDiv.scrollTop = messageHistoryDiv.scrollHeight;
 }
-
+ 
 function clearMessages() {
   const by = usernameInput.value.trim() || 'Desktop';
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -389,15 +400,12 @@ function clearMessages() {
     addSystemMessage(`🧹 Cleared messages locally by ${by}`);
   }
 }
-
+ 
 // === FINALIZED: Audio Mute/Unmute from ANDROID ===
 function handleControlCommand(command) {
-  if (!isStreamActive) {
-    return;
-  }
+  if (!isStreamActive && command !== 'stop_stream') return;
   switch (command && command.toLowerCase && command.toLowerCase()) {
     case 'mute':
-      // Mute the audio output on desktop
       if (muteBadge) muteBadge.style.display = 'block';
       if (videoElement) videoElement.muted = true;
       break;
@@ -414,16 +422,20 @@ function handleControlCommand(command) {
       if (videoOverlay) videoOverlay.style.display = 'none';
       if (videoElement) videoElement.style.visibility = 'visible';
       break;
+    case 'stop_stream':
+      console.log('[CONTROL] Stopping stream via command');
+      stopStream();
+      break;
     default:
       console.warn('[CONTROL] Unknown command:', command);
   }
 }
-
+ 
 // Don't change audio tracks, only Android controls mute/unmute
 function setAudioTracksMuted(mute) {
   // No-op; muting is controlled by Android.
 }
-
+ 
 function checkStreamHealth() {
   if (!peerConnection || !isStreamActive) return false;
   const videoTracks = remoteStream?.getVideoTracks() || [];
@@ -432,7 +444,7 @@ function checkStreamHealth() {
     videoTracks.every(t => t.readyState === 'live') &&
     audioTracks.every(t => t.readyState === 'live');
 }
-
+ 
 // === UI Event Bindings ===
 sendButton.addEventListener('click', sendMessage);
 messageInput.addEventListener('keypress', (e) => {
@@ -443,19 +455,16 @@ messageInput.addEventListener('keypress', (e) => {
 });
 clearMessagesBtn?.addEventListener('click', clearMessages);
 openEmulatorBtn?.addEventListener('click', () => {
-  // Could open your XR emulator link if applicable, or do nothing in web context.
   window.open('http://localhost:3000/display.html', '_blank');
 });
-
-// Make the overlay itself clickable as well (for full-screen click-to-play)
 if (videoOverlay) {
   videoOverlay.addEventListener('click', () => {
     videoOverlay.style.display = 'none';
     videoElement.play();
   });
 }
-
-// Connect on load
+ 
 window.addEventListener('load', () => {
+  console.log('[APP] Window loaded. Connecting WebSocket...');
   connectWebSocket();
 });
