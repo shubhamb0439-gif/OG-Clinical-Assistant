@@ -25,8 +25,8 @@ let reconnectTimeout = null;
 let heartbeatInterval = null;
 
 // CONFIG
-// const SIGNALING_SERVER_URL = 'wss://f75ea4e18683.ngrok-free.app';
-const SIGNALING_SERVER_URL = 'wss://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
+const SIGNALING_SERVER_URL = 'wss://7ee567fe28d8.ngrok-free.app';
+// const SIGNALING_SERVER_URL = 'wss://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
 
 function setStatus(status) {
   console.log('[STATUS] Updated:', status);
@@ -48,21 +48,11 @@ function connectWebSocket() {
   ws.onopen = () => {
     console.log('[WS] Connected');
     setStatus('Connected');
-
-    // Send identification info
-    const identificationMsg = {
+    ws.send(JSON.stringify({
       type: "identification",
       xrId: xrIdInput.value || "XR-1238",
       deviceName: usernameInput.value || "Desktop"
-    };
-    ws.send(JSON.stringify(identificationMsg));
-    console.log('[WS] Sent identification:', identificationMsg);
-
-    // Immediately request device list for instant UI update
-    const deviceListRequest = { type: "request_device_list" };
-    ws.send(JSON.stringify(deviceListRequest));
-    console.log('[WS] Sent device list request:', deviceListRequest);
-
+    }));
     if (reconnectTimeout) {
       clearTimeout(reconnectTimeout);
       reconnectTimeout = null;
@@ -75,7 +65,7 @@ function connectWebSocket() {
     setStatus('Disconnected');
     if (heartbeatInterval) clearInterval(heartbeatInterval);
     if (!reconnectTimeout) {
-      reconnectTimeout = setTimeout(connectWebSocket, 2000);
+      reconnectTimeout = setTimeout(connectWebSocket, 1000);
     }
   };
 
@@ -211,6 +201,7 @@ async function handleOffer(offer) {
   }
 
   try {
+    // Support both {type, sdp} or full RTCSessionDescription object
     const remoteDesc = offer.sdp
       ? { type: offer.type || 'offer', sdp: offer.sdp }
       : offer;
@@ -279,13 +270,11 @@ function showClickToPlayOverlay() {
 // ========== Device List ==========
 function updateDeviceList(devices) {
   deviceListElement.innerHTML = '';
-  const seen = new Set();
   devices.forEach(device => {
-    const id = device.xrId || device.deviceName || device.name;
-    if (seen.has(id)) return;
-    seen.add(id);
+    // Log devices and XR IDs for clarity
+    console.log(`[DEVICE] DeviceName: ${device.name || device.deviceName || '(no name)'}  XR-ID: ${device.xrId || '(no xrId)'}`);
     const li = document.createElement('li');
-    li.textContent = `${device.name || device.deviceName || id} (${id})`;
+    li.textContent = `${device.name || device.deviceName || device.xrId} (${device.xrId})`;
     deviceListElement.appendChild(li);
   });
 }
@@ -308,7 +297,7 @@ function sendMessage() {
     };
     ws.send(JSON.stringify(message));
     addMessageToHistory(message);
-    // <-- removed addToRecentMessages(message) to avoid duplication on server echo
+    // addToRecentMessages(message);
     messageInput.value = '';
   }
 }
@@ -323,16 +312,20 @@ function normalizeMessage(message) {
     priority: 'normal'
   };
 
+  // If message.text looks like a JSON object, parse it!
   let parsed = {};
   if (typeof message.text === 'string' && message.text.trim().startsWith('{') && message.text.trim().endsWith('}')) {
     try {
       parsed = JSON.parse(message.text);
-    } catch (e) {}
+    } catch (e) {
+      // Not JSON, leave as is
+    }
   }
 
+  // Merge parsed fields, prefer real message fields first
   const sender = message.sender || parsed.sender || 'unknown';
   const xrId = message.xrId || parsed.xrId || 'unknown';
-  const text = parsed.text ? parsed.text : message.text || '';
+  const text = message.text && typeof message.text === 'string' && parsed.text ? parsed.text : message.text || '';
   const timestamp = message.timestamp || parsed.timestamp || new Date().toLocaleTimeString();
   const isUrgent = message.urgent === true ||
     message.priority === 'urgent' ||
