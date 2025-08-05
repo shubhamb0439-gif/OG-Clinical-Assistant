@@ -116,12 +116,8 @@ wss.on('connection', (ws) => {
         break;
 
       case 'request_device_list':
-        ws.send(JSON.stringify({
-          type: 'device_list',
-          devices: Array.from(clients)
-            .filter(c => c.deviceName)
-            .map(c => ({ name: c.deviceName, xrId: c.xrId }))
-        }));
+        console.log(`[DEVICE LIST] Device list requested by: ${ws.deviceName || 'Unknown'} (${ws.xrId || 'no-id'})`);
+        broadcastDeviceList();
         break;
 
       case 'message':
