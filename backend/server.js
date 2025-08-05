@@ -427,33 +427,20 @@ wss.on('connection', (ws) => {
         ws.deviceName = deviceName || 'Unknown';
         ws.xrId = xrId || null;
 
-        // === NEW: Enforce 1:1 Desktop Connection ===
-        // if (ws.deviceName.startsWith('Desktop') || ws.xrId === 'XR-1238') {
-        //   if (desktopClients.has(ws.xrId)) {
-        //     console.log(`[BLOCKED] Duplicate desktop tab for ${ws.xrId}`);
-        //     ws.send(JSON.stringify({
-        //       type: 'error',
-        //       message: 'Duplicate desktop tab. Only one allowed.'
-        //     }));
-        //     ws.close();
-        //     return;
-        //   }
-        //   desktopClients.set(ws.xrId, ws);
-        // }
-        // ----------------------------******refresh part*****-------------------------------------------
-          if (ws.deviceName.startsWith('Desktop') || ws.xrId === 'XR-1238') {
-            if (desktopClients.has(ws.xrId)) {
-              console.log(`[BLOCKED] Duplicate desktop tab for ${ws.xrId}`);
-              ws.send(JSON.stringify({
-                type: 'duplicate_tab',
-                message: 'Another tab is already active. Please close other tabs before continuing.'
-              }));
-              ws.close();
-              return;
-            }
-            desktopClients.set(ws.xrId, ws);
+        === NEW: Enforce 1:1 Desktop Connection ===
+        if (ws.deviceName.startsWith('Desktop') || ws.xrId === 'XR-1238') {
+          if (desktopClients.has(ws.xrId)) {
+            console.log(`[BLOCKED] Duplicate desktop tab for ${ws.xrId}`);
+            ws.send(JSON.stringify({
+              type: 'error',
+              message: 'Duplicate desktop tab. Only one allowed.'
+            }));
+            ws.close();
+            return;
           }
-      // -------------------------****refresh part*******--------------------------------------------
+          desktopClients.set(ws.xrId, ws);
+        }
+
           
         console.log(`[IDENTIFIED] ${ws.deviceName} (${ws.xrId || 'no-id'}) just connected.`);
         broadcastDeviceList();
