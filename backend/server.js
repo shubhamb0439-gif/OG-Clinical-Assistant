@@ -947,4 +947,4 @@ function shutdown() {
 
 process.on('uncaughtException', (err) => {
   console.error('[FATAL ERROR] Uncaught exception occurred:', err);
-}); 
+});
