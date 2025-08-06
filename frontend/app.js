@@ -1084,7 +1084,8 @@ let reconnectTimeout = null;
 let heartbeatInterval = null;
 
 // CONFIG
-const SIGNALING_SERVER_URL = 'wss://8c4d78ab77fb.ngrok-free.app';
+// const SIGNALING_SERVER_URL = 'wss://8c4d78ab77fb.ngrok-free.app';
+const SIGNALING_SERVER_URL = 'wss://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
 
 function setStatus(status) {
   console.log('[STATUS] Updated:', status);
