@@ -168,26 +168,50 @@ io.on('connection', (socket) => {
     logCurrentDevices();
   });
 
-  socket.on('identify', ({ deviceName, xrId }) => {
-    console.log(`[IDENTIFY] Request from ${socket.id}: ${deviceName} (${xrId})`);
-    socket.data.deviceName = deviceName || 'Unknown';
-    socket.data.xrId = xrId;
-    clients.set(xrId, socket);
+  // socket.on('identify', ({ deviceName, xrId }) => {
+  //   console.log(`[IDENTIFY] Request from ${socket.id}: ${deviceName} (${xrId})`);
+  //   socket.data.deviceName = deviceName || 'Unknown';
+  //   socket.data.xrId = xrId;
+  //   clients.set(xrId, socket);
 
-    if (deviceName?.toLowerCase().includes('desktop') || xrId === 'XR-1238') {
-      console.log(`[IDENTIFY] Detected desktop client: ${xrId}`);
-      if (desktopClients.has(xrId)) {
-        console.warn(`[IDENTIFY] Duplicate desktop tab detected: ${xrId}`);
-        socket.emit('error', { message: 'Duplicate desktop tab' });
-        socket.disconnect();
-        return;
-      }
-      desktopClients.set(xrId, socket);
+  //   if (deviceName?.toLowerCase().includes('desktop') || xrId === 'XR-1238') {
+  //     console.log(`[IDENTIFY] Detected desktop client: ${xrId}`);
+  //     if (desktopClients.has(xrId)) {
+  //       console.warn(`[IDENTIFY] Duplicate desktop tab detected: ${xrId}`);
+  //       socket.emit('error', { message: 'Duplicate desktop tab' });
+  //       socket.disconnect();
+  //       return;
+  //     }
+  //     desktopClients.set(xrId, socket);
+  //   }
+
+  //   console.log(`[IDENTIFY] Successfully identified: ${deviceName} (${xrId})`);
+  //   broadcastDeviceList();
+  // });
+socket.on('identify', ({ deviceName, xrId }) => {
+  console.log(`[IDENTIFY] Request from ${socket.id}: ${deviceName} (${xrId})`);
+  socket.data.deviceName = deviceName || 'Unknown';
+  socket.data.xrId = xrId;
+  clients.set(xrId, socket);
+
+  if (deviceName?.toLowerCase().includes('desktop') || xrId === 'XR-1238') {
+    console.log(`[IDENTIFY] Detected desktop client: ${xrId}`);
+    if (desktopClients.has(xrId)) {
+      console.warn(`[IDENTIFY] Duplicate desktop tab detected: ${xrId}`);
+      socket.emit('error', { message: 'Duplicate desktop tab' });
+      socket.disconnect();
+      return;
     }
+    desktopClients.set(xrId, socket);
+  }
 
-    console.log(`[IDENTIFY] Successfully identified: ${deviceName} (${xrId})`);
-    broadcastDeviceList();
-  });
+  console.log(`[IDENTIFY] Successfully identified: ${deviceName} (${xrId})`);
+
+  // 🔽 NEW: send list to everyone + immediate echo to this client
+  const list = buildDeviceList();
+  io.emit('device_list', list);
+  socket.emit('device_list', list);
+});
 
   // WebRTC signaling
   socket.on('signal', ({ type, from, to, data }) => {
