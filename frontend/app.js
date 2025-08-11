@@ -80,22 +80,15 @@ function connectSocketIO() {
 
   
 
-  // socket.on('connect', () => {
-  //   console.log('[SOCKET] ✅ Successfully connected to server');
-  //   setStatus('Connected');
-  //   console.log('[SOCKET] Emitting identify with:', { deviceName: DEVICE_NAME, xrId: XR_ID });
-  //   socket.emit('identify', {
-  //     deviceName: DEVICE_NAME,
-  //     xrId: XR_ID
-  //   });
-socket.on('connect', () => {
-  console.log('[SOCKET] ✅ Successfully connected to server');
-  setStatus('Connected');
-  console.log('[SOCKET] Emitting identify with:', { deviceName: DEVICE_NAME, xrId: XR_ID });
-  socket.emit('identify', {
-    deviceName: DEVICE_NAME,
-    xrId: XR_ID
-  });
+  socket.on('connect', () => {
+    console.log('[SOCKET] ✅ Successfully connected to server');
+    setStatus('Connected');
+    console.log('[SOCKET] Emitting identify with:', { deviceName: DEVICE_NAME, xrId: XR_ID });
+    socket.emit('identify', {
+      deviceName: DEVICE_NAME,
+      xrId: XR_ID
+    });
+
    // ask the server to immediately send the current list
   socket.emit('request_device_list');
     if (reconnectTimeout) {
