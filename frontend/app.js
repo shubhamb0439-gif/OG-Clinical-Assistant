@@ -31,7 +31,7 @@ let heartbeatInterval = null;
 
 // CONFIG
 console.log('[CONFIG] Loading configuration');
-const SERVER_URL = 'https://d0ae3574be47.ngrok-free.app';
+const SERVER_URL = 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
 const XR_ID = xrIdInput.value?.trim() || "XR-1238";
 const DEVICE_NAME = usernameInput.value?.trim() || "Desktop";
 const ANDROID_ID = "XR-1234"; // direct messages/control target
