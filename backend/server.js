@@ -98,10 +98,7 @@ const messageHistory = [];         // simple in-memory message history (last 100
 // Pairing / rooms
 // For now: an in-memory allowlist. Replace with DB query later.
 const allowedPairs = new Set([
-  // canonical pairs (sorted) e.g., normalizePair('XR-1234', 'XR-1238')
-  // Add your allowed hard-coded pairs here temporarily
-  // Example:
-  // normalizePair('XR-1234', 'XR-1238'),
+ normalizePair('XR-1234', 'XR-1238'),
 ]);
 
 console.log('[SOCKET.IO] Data structures initialized');
