@@ -1987,70 +1987,29 @@ function ensurePeerReadyThenRequestOffer() {
   requestOfferFromPeer();
 }
 
-// ---------------- Remote control / commands ----------------
-// function handleControlCommand(data) {
-//   console.log('[CONTROL] Received control command:', data?.command);
-//   const command = (data?.command || '').toLowerCase();
-
-//   // allow start_stream (and request_offer) even if stream is not yet active
-//   if (!isStreamActive && !['start_stream', 'request_offer', 'stop_stream'].includes(command)) {
-//     console.log('[CONTROL] Stream not active - ignoring command:', command);
-//     return;
-//   }
-
-//   switch (command) {
-//     case 'start_stream':
-//       console.log('[CONTROL] Executing start_stream command');
-//       addSystemMessage('🎥 Start stream requested');
-//       ensurePeerReadyThenRequestOffer();  // prepare PC and ask peer to send an SDP offer
-//       break;
-
-//     case 'request_offer': // optional round‑trip support if peer asks us to prompt again
-//       console.log('[CONTROL] Executing request_offer');
-//       ensurePeerReadyThenRequestOffer();
-//       break;
-
-//     case 'mute':
-//       console.log('[CONTROL] Executing mute command');
-//       if (muteBadge) muteBadge.style.display = 'block';
-//       if (videoElement) videoElement.muted = true;
-//       break;
-//     case 'unmute':
-//       console.log('[CONTROL] Executing unmute command');
-//       if (muteBadge) muteBadge.style.display = 'none';
-//       if (videoElement) {
-//         videoElement.muted = false;
-//         videoElement.play().catch(() => {});
-//       }
-//       break;
-//     case 'hide_video':
-//       console.log('[CONTROL] Executing hide_video command');
-//       if (videoOverlay) videoOverlay.style.display = 'flex';
-//       if (videoElement) videoElement.style.visibility = 'hidden';
-//       break;
-//     case 'show_video':
-//       console.log('[CONTROL] Executing show_video command');
-//       if (videoOverlay) videoOverlay.style.display = 'none';
-//       if (videoElement) videoElement.style.visibility = 'visible';
-//       break;
-//     case 'stop_stream':
-//       console.log('[CONTROL] Executing stop_stream command');
-//       stopStream();
-//       break;
-//     default:
-//       console.warn('[CONTROL] Unknown command received:', command);
-//   }
-// }
+---------------- Remote control / commands ----------------
 function handleControlCommand(data) {
   console.log('[CONTROL] Received control command:', data?.command);
   const command = (data?.command || '').toLowerCase();
 
-  if (!isStreamActive && command !== 'stop_stream') {
-    console.log('[CONTROL] Stream not active - ignoring command');
+  // allow start_stream (and request_offer) even if stream is not yet active
+  if (!isStreamActive && !['start_stream', 'request_offer', 'stop_stream'].includes(command)) {
+    console.log('[CONTROL] Stream not active - ignoring command:', command);
     return;
   }
 
   switch (command) {
+    case 'start_stream':
+      console.log('[CONTROL] Executing start_stream command');
+      addSystemMessage('🎥 Start stream requested');
+      ensurePeerReadyThenRequestOffer();  // prepare PC and ask peer to send an SDP offer
+      break;
+
+    case 'request_offer': // optional round‑trip support if peer asks us to prompt again
+      console.log('[CONTROL] Executing request_offer');
+      ensurePeerReadyThenRequestOffer();
+      break;
+
     case 'mute':
       console.log('[CONTROL] Executing mute command');
       if (muteBadge) muteBadge.style.display = 'block';
@@ -2082,6 +2041,7 @@ function handleControlCommand(data) {
       console.warn('[CONTROL] Unknown command received:', command);
   }
 }
+
 
 // ---------------- 🔷 Pairing helper ----------------
 function pairWith(peerId) {
