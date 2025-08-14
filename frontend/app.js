@@ -1639,25 +1639,39 @@ function createPeerConnection() {
     });
   };
 
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      console.log('[WEBRTC] Generated ICE candidate:', event.candidate);
-      // 🔷 Prefer room forwarding (omit 'to' when joined)
-      const payload = {
-        type: 'ice-candidate',
-        from: XR_ID,
-        data: event.candidate,
-      };
-      if (!currentRoom) {
-        // Fallback to direct-to behavior for compatibility
-        payload.to = currentPeerId();
-      }
-      console.log('[WEBRTC] Emitting signal (ice-candidate):', payload);
-      socket?.emit('signal', payload);
-    } else {
-      console.log('[WEBRTC] ICE gathering complete');
-    }
-  };
+  // pc.onicecandidate = (event) => {
+  //   if (event.candidate) {
+  //     console.log('[WEBRTC] Generated ICE candidate:', event.candidate);
+  //     // 🔷 Prefer room forwarding (omit 'to' when joined)
+  //     const payload = {
+  //       type: 'ice-candidate',
+  //       from: XR_ID,
+  //       data: event.candidate,
+  //     };
+  //     if (!currentRoom) {
+  //       // Fallback to direct-to behavior for compatibility
+  //       payload.to = currentPeerId();
+  //     }
+  //     console.log('[WEBRTC] Emitting signal (ice-candidate):', payload);
+  //     socket?.emit('signal', payload);
+  //   } else {
+  //     console.log('[WEBRTC] ICE gathering complete');
+  //   }
+  // };
+ pc.onicecandidate = (event) => {
+  if (event.candidate) {
+    console.log('[WEBRTC] Generated ICE candidate:', event.candidate);
+    socket?.emit('signal', {
+      type: 'ice-candidate',
+      to: currentPeerId(),  // ✅ always route directly to Android
+      from: XR_ID,
+      data: event.candidate,
+    });
+  } else {
+    console.log('[WEBRTC] ICE gathering complete');
+  }
+};
+
 
   pc.oniceconnectionstatechange = () => {
     console.log('[WEBRTC] ICE connection state changed:', pc.iceConnectionState);
@@ -1682,11 +1696,54 @@ function createPeerConnection() {
   return pc;
 }
 
+// async function handleOffer(offer) {
+//   console.log('[WEBRTC] Handling offer:', offer);
+//   stopStream();
+//   peerConnection = createPeerConnection();
+
+//   if (pendingIceCandidates.length > 0) {
+//     console.log('[WEBRTC] Processing', pendingIceCandidates.length, 'pending ICE candidates');
+//     for (const cand of pendingIceCandidates) {
+//       // eslint-disable-next-line no-await-in-loop
+//       await handleRemoteIceCandidate(cand);
+//     }
+//     pendingIceCandidates = [];
+//   }
+
+//   try {
+//     console.log('[WEBRTC] Setting remote description');
+//     await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+//     console.log('[WEBRTC] Creating answer');
+//     const answer = await peerConnection.createAnswer();
+//     console.log('[WEBRTC] Setting local description');
+//     await peerConnection.setLocalDescription(answer);
+
+//     // 🔷 Prefer room forwarding: omit 'to' if currentRoom exists
+//     const payload = {
+//       type: 'answer',
+//       from: XR_ID,
+//       data: peerConnection.localDescription,
+//     };
+//     if (!currentRoom) {
+//       payload.to = currentPeerId();
+//     }
+//     console.log('[WEBRTC] Emitting signal (answer):', payload);
+//     socket?.emit('signal', payload);
+//     console.log('[WEBRTC] Answer sent to peer');
+//   } catch (err) {
+//     console.error('[WEBRTC] Error handling offer:', err);
+//   }
+// }
 async function handleOffer(offer) {
   console.log('[WEBRTC] Handling offer:', offer);
+
+  // Start from a clean state so repeated starts work reliably
   stopStream();
+
+  // Fresh RTCPeerConnection for this session
   peerConnection = createPeerConnection();
 
+  // Flush any ICE candidates that arrived before the PC was ready
   if (pendingIceCandidates.length > 0) {
     console.log('[WEBRTC] Processing', pendingIceCandidates.length, 'pending ICE candidates');
     for (const cand of pendingIceCandidates) {
@@ -1699,27 +1756,31 @@ async function handleOffer(offer) {
   try {
     console.log('[WEBRTC] Setting remote description');
     await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
+
     console.log('[WEBRTC] Creating answer');
     const answer = await peerConnection.createAnswer();
+
     console.log('[WEBRTC] Setting local description');
     await peerConnection.setLocalDescription(answer);
 
-    // 🔷 Prefer room forwarding: omit 'to' if currentRoom exists
+    // ✅ Always include `to` so the server routes back to Android reliably
     const payload = {
       type: 'answer',
+      to: currentPeerId(),              // e.g., 'XR-1234'
       from: XR_ID,
       data: peerConnection.localDescription,
     };
-    if (!currentRoom) {
-      payload.to = currentPeerId();
-    }
     console.log('[WEBRTC] Emitting signal (answer):', payload);
     socket?.emit('signal', payload);
+
     console.log('[WEBRTC] Answer sent to peer');
   } catch (err) {
     console.error('[WEBRTC] Error handling offer:', err);
+    // Ensure we clean up so a fresh start works next time
+    try { stopStream(); } catch (e) { /* noop */ }
   }
 }
+
 
 async function handleRemoteIceCandidate(candidate) {
   console.log('[WEBRTC] Handling remote ICE candidate:', candidate);
@@ -1999,11 +2060,36 @@ function handleControlCommand(data) {
   }
 
   switch (command) {
-    case 'start_stream':
-      console.log('[CONTROL] Executing start_stream command');
-      addSystemMessage('🎥 Start stream requested');
-      ensurePeerReadyThenRequestOffer();  // prepare PC and ask peer to send an SDP offer
-      break;
+    // case 'start_stream':
+    //   console.log('[CONTROL] Executing start_stream command');
+    //   addSystemMessage('🎥 Start stream requested');
+    //   ensurePeerReadyThenRequestOffer();  // prepare PC and ask peer to send an SDP offer
+    //   break;
+    case 'start_stream': {
+  console.log('[CONTROL] Executing start_stream command');
+  addSystemMessage('🎥 Start stream requested');
+
+  // Always start clean so repeated starts work
+  stopStream();
+
+  // New RTCPeerConnection for this session
+  peerConnection = createPeerConnection();
+
+  // Ask Android for a fresh SDP offer — ALWAYS include `to`
+  const to = currentPeerId(); // e.g., 'XR-1234'
+  console.log('[CONTROL] Requesting SDP offer from peer:', to);
+  socket?.emit('control', { to, command: 'request_offer' });
+
+  // Optional: retry if no offer arrives
+  if (window.__offerRetryTimer) clearTimeout(window.__offerRetryTimer);
+  window.__offerRetryTimer = setTimeout(() => {
+    if (!peerConnection || peerConnection.signalingState === 'closed') return;
+    console.log('[CONTROL] No offer yet, re-requesting…');
+    socket?.emit('control', { to, command: 'request_offer' });
+  }, 4000);
+  break;
+}
+
 
     case 'request_offer': // optional round‑trip support if peer asks us to prompt again
       console.log('[CONTROL] Executing request_offer');
