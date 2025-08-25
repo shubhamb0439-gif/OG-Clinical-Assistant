@@ -64,34 +64,89 @@ console.log('[SOCKET.IO] Socket.IO server initialized');
 app.use(cors());
 app.use(express.json());
 console.log('[MIDDLEWARE] CORS + JSON enabled');
-// -------------------- Static --------------------
-const staticPaths = [
-  path.join(__dirname, 'public'),
-  path.join(__dirname, '../frontend'),
-];
-let staticPathFound = null;
-for (const dir of staticPaths) {
-  if (fs.existsSync(dir)) {
-    app.use(express.static(dir));
-    staticPathFound = dir;
-    console.log(`[STATIC] Serving static from ${dir}`);
-  } else {
-    dlog('[STATIC] Not found:', dir);
-  }
-}
-if (!staticPathFound) dwarn('⚠️ No static path found.');
+// // -------------------- Static --------------------
+// const staticPaths = [
+//   path.join(__dirname, 'public'),
+//   path.join(__dirname, '../frontend'),
+// ];
+// let staticPathFound = null;
+// for (const dir of staticPaths) {
+//   if (fs.existsSync(dir)) {
+//     app.use(express.static(dir));
+//     staticPathFound = dir;
+//     console.log(`[STATIC] Serving static from ${dir}`);
+//   } else {
+//     dlog('[STATIC] Not found:', dir);
+//   }
+// }
+// if (!staticPathFound) dwarn('⚠️ No static path found.');
  
-// Route for cockpit page (works with backend/public or ../frontend)
+// // Route for cockpit page (works with backend/public or ../frontend)
+// app.get(['/scribe-cockpit', '/scribe-cockpit.html'], (req, res) => {
+//   const candidates = [
+//     path.join(__dirname, 'public', 'scribe-cockpit.html'),
+//     path.join(__dirname, '..', 'frontend', 'scribe-cockpit.html'),
+//   ];
+//   const hit = candidates.find(p => fs.existsSync(p));
+//   console.log('[ROUTE] /scribe-cockpit hit. Candidates:', candidates, 'Chosen:', hit);
+//   if (!hit) return res.status(404).send('scribe-cockpit.html not found');
+//   res.sendFile(hit);
+// });
+
+// -------------------- Static --------------------
+
+const staticPaths = [
+
+  path.join(__dirname, 'public'),
+
+  path.join(__dirname, '../frontend/dist'),  // 👈 serve the frontend build folder
+
+];
+ 
+let staticPathFound = null;
+
+for (const dir of staticPaths) {
+
+  if (fs.existsSync(dir)) {
+
+    app.use(express.static(dir));
+
+    staticPathFound = dir;
+
+    console.log(`[STATIC] Serving static from ${dir}`);
+
+  } else {
+
+    console.log('[STATIC] Not found:', dir);
+
+  }
+
+}
+
+if (!staticPathFound) console.warn('⚠️ No static path found.');
+ 
+// -------------------- Cockpit Route --------------------
+
 app.get(['/scribe-cockpit', '/scribe-cockpit.html'], (req, res) => {
+
   const candidates = [
+
     path.join(__dirname, 'public', 'scribe-cockpit.html'),
-    path.join(__dirname, '..', 'frontend', 'scribe-cockpit.html'),
+
+    path.join(__dirname, '../frontend/dist', 'scribe-cockpit.html'), // 👈 check dist too
+
   ];
+
   const hit = candidates.find(p => fs.existsSync(p));
+
   console.log('[ROUTE] /scribe-cockpit hit. Candidates:', candidates, 'Chosen:', hit);
+
   if (!hit) return res.status(404).send('scribe-cockpit.html not found');
+
   res.sendFile(hit);
-});
+
+}); 
+ 
 // -------------------- TURN Injection --------------------
 function injectTurnConfig(html) {
   dlog('[TURN] injectTurnConfig start');
