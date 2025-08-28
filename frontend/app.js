@@ -35,6 +35,8 @@ let reconnectTimeout = null;
 let heartbeatInterval = null;
 let lastDeviceList = []; // remember last list we got
 let duplicateNotified = false; // notify once per session about duplicate tabs
+let duplicateLock = false; // 🔒 prevents reconnect loops once server says ID is in use
+
 
 
 
@@ -75,7 +77,7 @@ const AUTO_KEY = 'XR_AUTOCONNECT';
    ✅ ID-gating helpers (added)
    ========================= */
 const ALLOWED_ID_NUM = '1238';
-const ALLOWED_ID     = `XR-${ALLOWED_ID_NUM}`;
+const ALLOWED_ID = `XR-${ALLOWED_ID_NUM}`;
 
 function sanitizeIdInput(v) {
   // keep previous placeholder behavior + trimming
@@ -103,7 +105,8 @@ const CLEAR_KEY = 'XR_CLEAR_ON_NEXT_CONNECT'; // '1' => wipe on next connect
 // ---------------- CONFIG ----------------
 console.log('[CONFIG] Loading configuration');
 // Update to your server URL as needed:
-// const SERVER_URL = 'https://0630ca54cd9b.ngrok-free.app';
+// const SERVER_URL = 'https://4c3d0437a78f.ngrok-free.app';
+
 const SERVER_URL = 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
 
 /* ------------- XR_ID / NAME init (updated) ------------- */
@@ -143,7 +146,7 @@ let duplicateActive = false;
 let presencePingInterval = null;
 
 function openPresenceChannel() {
-  if (presenceChan) try { presenceChan.close(); } catch {}
+  if (presenceChan) try { presenceChan.close(); } catch { }
   presenceChan = new BroadcastChannel('xr-presence');
 
   presenceChan.onmessage = (e) => {
@@ -203,6 +206,9 @@ xrIdInput.addEventListener('change', () => {
   const newId = normalizeId(xrIdInput.value);
   XR_ID = newId; // no fallback
 
+  duplicateLock = false; // user changed ID → allow attempts again
+
+
   if (!isAllowedId(XR_ID)) {
     // Reset label and hide device list if disallowed
     DEVICE_NAME = 'Desktop';
@@ -210,7 +216,7 @@ xrIdInput.addEventListener('change', () => {
     addSystemMessage(`❌ Only ID ${ALLOWED_ID} can connect. You entered "${newId || '(empty)'}".`);
     // If connected with a different ID somehow, drop it.
     if (socket?.connected) {
-      try { localStorage.setItem(AUTO_KEY, '0'); } catch {}
+      try { localStorage.setItem(AUTO_KEY, '0'); } catch { }
       socket.disconnect();
     }
     setStatus('Disconnected');
@@ -225,7 +231,7 @@ xrIdInput.addEventListener('change', () => {
   if (!socket.connected) {
     setStatus('Connecting');
     if (socket?.io) socket.io.opts.reconnection = true;
-    try { localStorage.setItem(AUTO_KEY, '1'); } catch {}
+    try { localStorage.setItem(AUTO_KEY, '1'); } catch { }
     socket.connect();
   }
 });
@@ -321,7 +327,7 @@ function initSocket() {
         addSystemMessage(!isAllowedId(XR_ID)
           ? `❌ Only ${ALLOWED_ID} may connect. Disconnecting…`
           : '⚠️ This XR ID is already active in another tab/window. Disconnecting…');
-        try { localStorage.setItem(AUTO_KEY, '0'); } catch {}
+        try { localStorage.setItem(AUTO_KEY, '0'); } catch { }
         if (socket?.io) socket.io.opts.reconnection = false;
         socket.disconnect();
         setStatus('Disconnected');
@@ -346,7 +352,7 @@ function initSocket() {
       setStatus('Connected');
 
       // keep refresh-safe autoconnect behavior
-      try { localStorage.setItem(AUTO_KEY, '1'); } catch {}
+      try { localStorage.setItem(AUTO_KEY, '1'); } catch { }
 
       const payload = { deviceName: DEVICE_NAME, xrId: XR_ID };
       console.log('[SOCKET] Emitting identify + request_device_list', payload);
@@ -413,6 +419,22 @@ function initSocket() {
     }
   });
 
+  // 🔒 Global duplicate block from server (works across laptops/phones)
+  socket.on('duplicate_id', ({ xrId, holderInfo }) => {
+    console.warn('[SOCKET] duplicate_id from server:', xrId, holderInfo);
+    duplicateLock = true;                    // stop future attempts with this ID
+    try { localStorage.setItem(AUTO_KEY, '0'); } catch { }
+    addSystemMessage(`❌ XR ID ${xrId} is already in use on another device/session.`);
+    if (socket?.io) {
+      socket.io.opts.reconnection = false;   // prevent auto-retries
+      socket.io.opts.autoConnect = false;
+    }
+    if (socket?.connected) socket.disconnect();
+    setStatus('Disconnected');
+    announcePresence('idle');
+  });
+
+
   // --- your existing handlers ---
   socket.on('signal', handleSignalMessage);
   socket.on('message', handleChatMessage);
@@ -452,12 +474,20 @@ function toggleConnection() {
   // ============================================================
   XR_ID = normalizeId(xrIdInput.value);
 
+  if (duplicateLock) {
+    addSystemMessage('🚫 This XR ID is already active elsewhere. Choose a different ID or disconnect the other session.');
+    setStatus('Disconnected');
+    announcePresence('idle');
+    return;
+  }
+
+
   if (socket.connected) {
     console.log('[SOCKET] Manual disconnect requested');
     manualDisconnect = true;                 // mark user-initiated
     try {
       localStorage.setItem(AUTO_KEY, '0');   // block future auto-connects
-    } catch {}
+    } catch { }
     // Hard-disable reconnection until user explicitly connects
     if (socket?.io) socket.io.opts.reconnection = false;
 
@@ -472,7 +502,7 @@ function toggleConnection() {
   if (!isAllowedId(XR_ID)) {
     // addSystemMessage(`❌ Connecting blocked. Enter "${ALLOWED_ID_NUM}" (or "${ALLOWED_ID}") first.`);
     addSystemMessage('Please enter the XR ID to connect (e.g., XR-1238).');
-    try { localStorage.setItem(AUTO_KEY, '0'); } catch {}
+    try { localStorage.setItem(AUTO_KEY, '0'); } catch { }
     setStatus('Disconnected');
     announcePresence('idle');
     return;
@@ -486,7 +516,7 @@ function toggleConnection() {
   setTimeout(() => {
     if (duplicateActive) {
       addSystemMessage('⚠️ This XR ID is already active in another tab/window.');
-      try { localStorage.setItem(AUTO_KEY, '0'); } catch {}
+      try { localStorage.setItem(AUTO_KEY, '0'); } catch { }
       setStatus('Disconnected');
       announcePresence('idle');
       return;
@@ -497,7 +527,7 @@ function toggleConnection() {
     if (socket?.io) socket.io.opts.reconnection = true;
 
     setStatus('Connecting');
-    try { localStorage.setItem(AUTO_KEY, '1'); } catch {}
+    try { localStorage.setItem(AUTO_KEY, '1'); } catch { }
     socket.connect();
   }, 300); // small window to receive presence replies
 }
@@ -555,29 +585,29 @@ function handleSignalMessage(data) {
       mergedFinal
     );
 
- // Debounced flush: merge quick finals, then emit once
-if (slot.flushTimer) clearTimeout(slot.flushTimer);
-slot.flushTimer = setTimeout(() => {
-  if (slot.paragraph) {
-    // existing console log
-    console.log(`[TRANSCRIPT] ${timestamp} final ${from} -> ${to}: "${slot.paragraph}"`);
+    // Debounced flush: merge quick finals, then emit once
+    if (slot.flushTimer) clearTimeout(slot.flushTimer);
+    slot.flushTimer = setTimeout(() => {
+      if (slot.paragraph) {
+        // existing console log
+        console.log(`[TRANSCRIPT] ${timestamp} final ${from} -> ${to}: "${slot.paragraph}"`);
 
-    // NEW: mirror to cockpit via BroadcastChannel
-    try {
-      const bc = new BroadcastChannel('scribe-transcript');
-      bc.postMessage({
-        type: 'transcript_console',
-        data: { from, to, text: slot.paragraph, final: true, timestamp }
-      });
-      // bc.close(); // optional
-    } catch (e) {
-      // ignore if BroadcastChannel not available
-    }
+        // NEW: mirror to cockpit via BroadcastChannel
+        try {
+          const bc = new BroadcastChannel('scribe-transcript');
+          bc.postMessage({
+            type: 'transcript_console',
+            data: { from, to, text: slot.paragraph, final: true, timestamp }
+          });
+          // bc.close(); // optional
+        } catch (e) {
+          // ignore if BroadcastChannel not available
+        }
 
-    slot.paragraph = '';
-  }
-  slot.flushTimer = null;
-}, 1200);
+        slot.paragraph = '';
+      }
+      slot.flushTimer = null;
+    }, 1200);
 
     return; // don't fall through to WebRTC switch
   }
@@ -681,19 +711,19 @@ function createPeerConnection() {
   };
 
 
- pc.onicecandidate = (event) => {
-  if (event.candidate) {
-    console.log('[WEBRTC] Generated ICE candidate:', event.candidate);
-    socket?.emit('signal', {
-      type: 'ice-candidate',
-      to: currentPeerId(),  // ✅ always route directly to Android
-      from: XR_ID,
-      data: event.candidate,
-    });
-  } else {
-    console.log('[WEBRTC] ICE gathering complete');
-  }
-};
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      console.log('[WEBRTC] Generated ICE candidate:', event.candidate);
+      socket?.emit('signal', {
+        type: 'ice-candidate',
+        to: currentPeerId(),  // ✅ always route directly to Android
+        from: XR_ID,
+        data: event.candidate,
+      });
+    } else {
+      console.log('[WEBRTC] ICE gathering complete');
+    }
+  };
 
 
   pc.oniceconnectionstatechange = () => {
@@ -791,12 +821,12 @@ function stopStream() {
     console.log('[STREAM] Pausing and clearing video element');
     try {
       videoElement.pause();
-    } catch (e) {}
+    } catch (e) { }
     videoElement.srcObject = null;
     videoElement.removeAttribute('src');
     try {
       videoElement.load();
-    } catch (e) {}
+    } catch (e) { }
   }
 
   if (muteBadge) {
@@ -969,7 +999,7 @@ function normalizeMessage(message) {
 // }
 function addMessageToHistory(message) {
   const msg = normalizeMessage(message);
- 
+
   // Add to UI
   const el = document.createElement('div');
   el.className = `message ${msg.priority}`;
@@ -986,7 +1016,7 @@ function addMessageToHistory(message) {
   `;
   messageHistoryDiv.appendChild(el);
   messageHistoryDiv.scrollTop = messageHistoryDiv.scrollHeight;
- 
+
   // Save to localStorage
   const history = JSON.parse(localStorage.getItem('messageHistory') || '[]');
   history.push(msg);
@@ -1013,7 +1043,7 @@ function loadMessageHistory() {
   });
   messageHistoryDiv.scrollTop = messageHistoryDiv.scrollHeight;
 }
- 
+
 document.addEventListener('DOMContentLoaded', loadMessageHistory);
 
 function addToRecentMessages(message) {
@@ -1050,12 +1080,12 @@ function addSystemMessage(text) {
 function clearMessages() {
   socket?.emit('clear-messages', { by: DEVICE_NAME });
   clearedMessages.clear();
- 
+
   // Clear UI
   messageHistoryDiv.innerHTML = '';
   recentMessagesDiv.innerHTML = '<div class="system-message">Messages cleared</div>';
   addSystemMessage(`🧹 Cleared messages locally by ${DEVICE_NAME}`);
- 
+
   // Clear localStorage
   localStorage.removeItem('messageHistory');
 }
@@ -1099,29 +1129,29 @@ function handleControlCommand(data) {
     //   ensurePeerReadyThenRequestOffer();  // prepare PC and ask peer to send an SDP offer
     //   break;
     case 'start_stream': {
-  console.log('[CONTROL] Executing start_stream command');
-  addSystemMessage('🎥 Start stream requested');
+      console.log('[CONTROL] Executing start_stream command');
+      addSystemMessage('🎥 Start stream requested');
 
-  // Always start clean so repeated starts work
-  stopStream();
+      // Always start clean so repeated starts work
+      stopStream();
 
-  // New RTCPeerConnection for this session
-  peerConnection = createPeerConnection();
+      // New RTCPeerConnection for this session
+      peerConnection = createPeerConnection();
 
-  // Ask Android for a fresh SDP offer — ALWAYS include `to`
-  const to = currentPeerId(); // e.g., 'XR-1234'
-  console.log('[CONTROL] Requesting SDP offer from peer:', to);
-  socket?.emit('control', { to, command: 'request_offer' });
+      // Ask Android for a fresh SDP offer — ALWAYS include `to`
+      const to = currentPeerId(); // e.g., 'XR-1234'
+      console.log('[CONTROL] Requesting SDP offer from peer:', to);
+      socket?.emit('control', { to, command: 'request_offer' });
 
-  // Optional: retry if no offer arrives
-  if (window.__offerRetryTimer) clearTimeout(window.__offerRetryTimer);
-  window.__offerRetryTimer = setTimeout(() => {
-    if (!peerConnection || peerConnection.signalingState === 'closed') return;
-    console.log('[CONTROL] No offer yet, re-requesting…');
-    socket?.emit('control', { to, command: 'request_offer' });
-  }, 4000);
-  break;
-}
+      // Optional: retry if no offer arrives
+      if (window.__offerRetryTimer) clearTimeout(window.__offerRetryTimer);
+      window.__offerRetryTimer = setTimeout(() => {
+        if (!peerConnection || peerConnection.signalingState === 'closed') return;
+        console.log('[CONTROL] No offer yet, re-requesting…');
+        socket?.emit('control', { to, command: 'request_offer' });
+      }, 4000);
+      break;
+    }
 
 
     case 'request_offer': // optional round‑trip support if peer asks us to prompt again
@@ -1139,7 +1169,7 @@ function handleControlCommand(data) {
       if (muteBadge) muteBadge.style.display = 'none';
       if (videoElement) {
         videoElement.muted = false;
-        videoElement.play().catch(() => {});
+        videoElement.play().catch(() => { });
       }
       break;
     case 'hide_video':
