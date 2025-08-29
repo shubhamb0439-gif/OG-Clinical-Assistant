@@ -1,3 +1,5 @@
+// --------------------------------------------------SCribe-cockpit.js ----------------duplicate id working version ----29-08-25------------------------------------
+
 /* Scribe Cockpit (local⇄public aware + CDN socket.io fallback)
    Local env (localhost/LAN/file):    PREFER NGROK → fallback AZURE
    Public env (non-local host):       PREFER AZURE → fallback NGROK
@@ -8,7 +10,7 @@
 console.log('[SCRIBE] Booting Scribe Cockpit');
 
 // ---------- DOM ----------
-const statusPill   = document.getElementById('statusPill');
+const statusPill = document.getElementById('statusPill');
 const deviceListEl = document.getElementById('deviceList');
 const transcriptEl = document.getElementById('liveTranscript');
 
@@ -16,7 +18,7 @@ const PLACEHOLDER_ID = 'scribe-transcript-placeholder';
 const MAX_TRANSCRIPT_LINES = 300;
 
 // ---------- Endpoints & env ----------
-const NGROK_URL = 'https://0630ca54cd9b.ngrok-free.app'; // ← update when tunnel rotates
+const NGROK_URL = 'https://76c4ffa27855.ngrok-free.app'; // ← update when tunnel rotates
 const AZURE_URL = 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
 
 const OVERRIDES = Array.isArray(window.SCRIBE_PUBLIC_ENDPOINTS) ? window.SCRIBE_PUBLIC_ENDPOINTS : null;
@@ -34,7 +36,7 @@ const isLocal =
   /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
 
 const preferred = isLocal ? NGROK : AZURE;
-const fallback  = isLocal ? AZURE : NGROK;
+const fallback = isLocal ? AZURE : NGROK;
 
 let SERVER_URL = null;
 let socket = null;
@@ -60,10 +62,22 @@ function setStatus(status) {
   statusPill.setAttribute('aria-label', `Connection status: ${status}`);
   statusPill.classList.remove('bg-yellow-500', 'bg-green-500', 'bg-red-600');
   switch ((status || '').toLowerCase()) {
-    case 'connected':    statusPill.classList.add('bg-green-500'); break;
-    case 'disconnected': statusPill.classList.add('bg-red-600');   break;
-    default:             statusPill.classList.add('bg-yellow-500');
+    case 'connected': statusPill.classList.add('bg-green-500'); break;
+    case 'disconnected': statusPill.classList.add('bg-red-600'); break;
+    default: statusPill.classList.add('bg-yellow-500');
   }
+}
+
+// --- Empty-state helper for devices list (blackout) ---
+let forceNoDevices = true; // start in blackout until we connect
+
+function showNoDevices() {
+  if (!deviceListEl) return;
+  deviceListEl.innerHTML = '';
+  const li = document.createElement('li');
+  li.className = 'text-gray-400';
+  li.textContent = 'No devices online';
+  deviceListEl.appendChild(li);
 }
 
 // ---------- Script loaders ----------
@@ -117,6 +131,14 @@ function openPresenceChannel() {
       if (msg.type === 'presence') {
         lastPresenceState = msg.state || 'idle';
         setStatus(lastPresenceState === 'connected' ? 'Connected' : 'Disconnected');
+
+        // Mirror blackout based on presence state
+        if (lastPresenceState === 'connected') {
+          forceNoDevices = false;
+        } else {
+          forceNoDevices = true;
+          showNoDevices();
+        }
       }
     };
   } catch (e) {
@@ -127,6 +149,13 @@ function openPresenceChannel() {
 // ---------- Devices & transcript rendering ----------
 function updateDeviceList(devices) {
   if (!Array.isArray(devices)) return;
+
+  // 🔒 If we’re in blackout (disconnected / duplicate), keep "No devices online"
+  if (forceNoDevices) {
+    showNoDevices();
+    return;
+  }
+
   deviceListEl.innerHTML = '';
   devices.forEach((d) => {
     const name = d.deviceName || d.name || (d.xrId ? `Device (${d.xrId})` : 'Unknown');
@@ -240,19 +269,21 @@ function connectTo(endpointBase, onFailover) {
     };
 
     // Close any prior socket
-    try { socket?.close(); } catch {}
+    try { socket?.close(); } catch { }
     socket = window.io(SERVER_URL, opts);
 
     let connected = false;
     const failTimer = setTimeout(() => {
       if (!connected) {
         console.warn('[SCRIBE] Connect timeout, failing over from', endpointBase);
-        try { socket.close(); } catch {}
+        try { socket.close(); } catch { }
         onFailover?.();
       }
     }, 4000); // 4s to connect before failing over
 
     socket.on('connect', () => {
+      forceNoDevices = false;              // ✅ clear blackout on successful connect
+
       connected = true;
       clearTimeout(failTimer);
       console.log('[SCRIBE] socket connected →', SERVER_URL);
@@ -271,6 +302,9 @@ function connectTo(endpointBase, onFailover) {
 
     socket.on('disconnect', (reason) => {
       console.log('[SCRIBE] socket disconnected:', reason);
+      forceNoDevices = true;               // 🔒 engage blackout while offline
+      showNoDevices();
+
       if (!lastPresenceState) setStatus('Disconnected');
     });
   });
@@ -281,6 +315,9 @@ function connectTo(endpointBase, onFailover) {
   try {
     ensureTranscriptPlaceholder();
     openPresenceChannel();
+
+    showNoDevices(); // start with "No devices online" until a connect clears it
+
 
     // Always load a client (endpoint client or CDN) for the PREFERRED endpoint.
     await loadSocketIoClientFor(preferred);

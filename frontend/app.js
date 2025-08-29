@@ -1,3 +1,6 @@
+// --------------------------------------------------App.js ----------------duplicate id working version ----29-08-25------------------------------------
+
+
 console.log('[INIT] Initializing DOM elements');
 const videoElement = document.getElementById('xrVideo');
 const statusElement = document.getElementById('status');
@@ -105,7 +108,7 @@ const CLEAR_KEY = 'XR_CLEAR_ON_NEXT_CONNECT'; // '1' => wipe on next connect
 // ---------------- CONFIG ----------------
 console.log('[CONFIG] Loading configuration');
 // Update to your server URL as needed:
-// const SERVER_URL = 'https://4c3d0437a78f.ngrok-free.app';
+// const SERVER_URL = 'https://92b17f55f54a.ngrok-free.app';
 
 const SERVER_URL = 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
 

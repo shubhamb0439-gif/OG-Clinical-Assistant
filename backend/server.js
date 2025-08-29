@@ -1,3 +1,5 @@
+// --------------------------------------------------Server.js ----------------duplicate id working version ----29-08-25------------------------------------
+
 // // -------------------- Imports & Env --------------------
 const express = require('express');
 const http = require('http');
@@ -212,6 +214,18 @@ async function broadcastDeviceList() {
     dwarn('[DEVICE_LIST] Failed to build list:', e.message);
   }
 }
+
+
+// Emit an empty device list once (used to drive cockpit blackout)
+function broadcastEmptyDeviceListOnce() {
+  try {
+    dlog('[DEVICE_LIST] broadcasting EMPTY list (blackout)');
+    io.emit('device_list', []); // force UIs to show "No devices online"
+  } catch (e) {
+    dwarn('[DEVICE_LIST] empty broadcast failed:', e.message);
+  }
+}
+
 function addToMessageHistory(message) {
   messageHistory.push({ ...message, id: Date.now(), timestamp: new Date().toISOString() });
   if (messageHistory.length > 100) {
@@ -304,80 +318,7 @@ io.on('connection', (socket) => {
     })();
   });
 
-  // -------- identify --------
 
-  //   socket.on('identify', async ({ deviceName, xrId }) => {
-  //   dlog('[EVENT] identify', { deviceName, xrId });
-
-  //   // Basic identity
-  //   socket.data.deviceName = deviceName || 'Unknown';
-  //   socket.data.xrId = xrId;
-
-  //   // Always join personal room and register in maps
-  //   try {
-  //     await socket.join(roomOf(xrId));
-  //   } catch (e) {
-  //     dwarn('[IDENTIFY] failed to join personal room:', e?.message || e);
-  //   }
-  //   clients.set(xrId, socket);
-  //   onlineDevices.set(xrId, socket);
-
-  //   // ---- Refresh-safe desktop handling ----
-  //   // If this is the desktop client, replace any existing desktop socket for the same xrId
-  //   if ((deviceName?.toLowerCase().includes('desktop')) || xrId === 'XR-1238') {
-  //     const existing = desktopClients.get(xrId);
-
-  //     if (existing && existing.id !== socket.id) {
-  //       dlog('[IDENTIFY] Detected existing desktop session for', xrId, '— replacing (likely refresh)');
-  //       const prevRoomId = existing?.data?.roomId;
-
-  //       // Move new socket into the previous room (if any) BEFORE disconnecting old one.
-  //       if (prevRoomId) {
-  //         try {
-  //           await socket.join(prevRoomId);
-  //           socket.data.roomId = prevRoomId;
-  //           const members = listRoomMembers(prevRoomId);
-  //           dlog('[IDENTIFY] Migrated new socket into previous room', prevRoomId, 'members:', members);
-  //           io.to(prevRoomId).emit('room_joined', { roomId: prevRoomId, members });
-  //         } catch (e) {
-  //           dwarn('[IDENTIFY] Failed to migrate room on refresh:', e?.message || e);
-  //           // If migration fails, fall back to auto-pair later.
-  //           socket.data.roomId = null;
-  //         }
-  //       }
-
-  //       // Politely notify and disconnect the old socket
-  //       try { existing.emit('error', { message: 'Replaced by new session (refresh)' }); } catch {}
-  //       try { existing.disconnect(true); } catch (e) { dwarn('[IDENTIFY] error disconnecting old desktop socket:', e?.message || e); }
-  //     }
-
-  //     // Track (or re-track) the desktop socket
-  //     desktopClients.set(xrId, socket);
-  //     dlog('[IDENTIFY] desktop client tracked', xrId);
-  //   }
-
-  //   // Echo list to this client and broadcast updated global list
-  //   try {
-  //     const list = await buildDeviceListGlobal();
-  //     socket.emit('device_list', list);
-  //     await broadcastDeviceList();
-  //   } catch (e) {
-  //     derr('[identify] device_list error:', e.message);
-  //   }
-
-  //   // If not already in a migrated room, attempt server-driven auto-pairing
-  //   try {
-  //     if (!socket.data?.roomId) {
-  //       await tryAutoPair(xrId);
-  //     } else {
-  //       dlog('[IDENTIFY] Skipping tryAutoPair; already in room', socket.data.roomId);
-  //     }
-  //   } catch (e) {
-  //     derr('[identify] tryAutoPair error:', e.message);
-  //   }
-  // });
-
-  // -------- identify --------
   // -------- identify --------
   socket.on('identify', async ({ deviceName, xrId }) => {
     dlog('[EVENT] identify', { deviceName, xrId });
@@ -401,6 +342,19 @@ io.on('connection', (socket) => {
           socketId: holder.id,
         };
         dlog('[IDENTIFY] Duplicate xrId in use — rejecting:', holderInfo);
+
+        // ✅ blackout Cockpit: broadcast an empty device list once
+        broadcastEmptyDeviceListOnce();
+
+        // (optional) re-broadcast the real list shortly after, if you want auto-recover
+        setTimeout(async () => {
+          try {
+            await broadcastDeviceList();
+          } catch (e) {
+            dwarn('[DEVICE_LIST] delayed re-broadcast failed:', e.message);
+          }
+        }, 1200);
+
         socket.emit('duplicate_id', { xrId, holderInfo });
         return socket.disconnect(true);
       }
@@ -529,40 +483,8 @@ io.on('connection', (socket) => {
     }
   });
 
-  // -------- message --------
-  // socket.on('message', ({ from, to, text, urgent }) => {
-  //   dlog('[EVENT] message', { from, to, urgent, text: trimStr(text || '') });
-  //   try {
-  //     const msg = {
-  //       type: 'message',
-  //       from,
-  //       to,
-  //       text,
-  //       urgent,
-  //       sender: socket.data.deviceName || from || 'unknown',
-  //       xrId: from,
-  //       timestamp: new Date().toISOString(),
-  //     };
-  //     addToMessageHistory(msg);
 
-  //     if (to) {
-  //       dlog('[message] direct to', to);
-  //       io.to(roomOf(to)).emit('message', msg);
-  //     } else {
-  //       const roomId = socket.data?.roomId;
-  //       if (roomId) {
-  //         dlog('[message] room emit', roomId);
-  //         io.to(roomId).emit('message', msg);
-  //       } else {
-  //         dlog('[message] global broadcast (excluding sender)');
-  //         socket.broadcast.emit('message', msg);
-  //       }
-  //     }
-  //   } catch (err) {
-  //     derr('[message] handler error:', err.message);
-  //   }
-  // });
-  // -------- message (transcript-aware) --------
+
 
   // -------- message (transcript -> web console via signal) --------
   socket.on('message', (payload) => {
@@ -688,52 +610,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  // -------- disconnect --------
-  // socket.on('disconnect', async (reason) => {
-  //   dlog('❎ [EVENT] disconnect', { reason, xrId: socket.data?.xrId, device: socket.data?.deviceName });
-  //   try {
-  //     const xrId = socket.data?.xrId;
-  //     if (xrId) {
-  //       clients.delete(xrId);
-  //       onlineDevices.delete(xrId);
-  //       if (desktopClients.get(xrId) === socket) {
-  //         desktopClients.delete(xrId);
-  //         dlog('[disconnect] removed desktop client:', xrId);
-  //       }
-  //     }
-  //     await broadcastDeviceList();
-  //   } catch (err) {
-  //     derr('[disconnect] cleanup error:', err.message);
-  //   }
-  // });
-  //   socket.on('disconnect', async (reason) => {
-  //   dlog('❎ [EVENT] disconnect', { reason, xrId: socket.data?.xrId, device: socket.data?.deviceName });
-  //   try {
-  //     const xrId = socket.data?.xrId;
-  //     if (xrId) {
-  //       // Remove from your in-memory maps
-  //       clients.delete(xrId);
-  //       onlineDevices.delete(xrId);
-  //       if (desktopClients.get(xrId) === socket) {
-  //         desktopClients.delete(xrId);
-  //         dlog('[disconnect] removed desktop client:', xrId);
-  //       }
 
-  //       // 🔔 NEW: emit peer_left to any pair rooms this socket was in
-  //       for (const roomId of socket.rooms) {
-  //         if (roomId.startsWith('pair:')) {
-  //           socket.to(roomId).emit('peer_left', { xrId, roomId });
-  //           dlog('[disconnect] notified peer_left', { xrId, roomId });
-  //         }
-  //       }
-  //     }
-
-  //     // Still broadcast full device list so presence sync stays correct
-  //     await broadcastDeviceList();
-  //   } catch (err) {
-  //     derr('[disconnect] cleanup error:', err.message);
-  //   }
-  // });
 
   // Notify peers *before* Socket.IO removes the socket from rooms
   socket.on('disconnecting', () => {
@@ -813,3 +690,5 @@ function shutdown() {
     process.exit(1);
   }
 }
+
+
