@@ -22,56 +22,40 @@ jobs:
         with:
           node-version: '20.19.4'
 
+      # Install root dependencies (if you have any root-level scripts)
       - name: Install root dependencies
         run: npm install
 
+      # Install frontend dependencies
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm install --force
 
-      # Create the build directory structure that 'serve' expects
+      # Copy all frontend files (HTML, CSS, JS, PNG, fonts, etc.)
       - name: Prepare frontend files
         working-directory: frontend
         run: |
           mkdir -p build
-          cp -r * build/
-      # - name: Prepare frontend files
-      #   working-directory: frontend
-      #   run: |
-      #     mkdir -p build
-      #     cp -r * build/
+          cp *.html *.js *.css *.png build/
 
-      # Copy frontend to backend/public (for your backend to serve)
+      # Copy frontend build into backend/public
       - name: Copy frontend to backend
         run: |
           mkdir -p backend/public
           cp -r frontend/build/* backend/public/
 
+      # Install backend dependencies
       - name: Install backend dependencies
         working-directory: backend
         run: npm install --force
 
+      # Zip backend for deployment
       - name: Zip backend for deployment
         run: |
           cd backend
           zip -r ../release.zip .
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-release
-          path: release.zip
-
-  deploy:
-    runs-on: ubuntu-latest
-    needs: build-and-deploy
-
-    steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: backend-release
-
+      # Deploy directly to Azure (no artifact upload!)
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
@@ -79,6 +63,7 @@ jobs:
           slot-name: 'Production'
           package: release.zip
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_B711FBC961CA4D669DFD7810D502A2DE }}
+
 
 
 
