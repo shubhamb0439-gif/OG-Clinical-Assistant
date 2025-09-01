@@ -1,4 +1,4 @@
-// --------------------------------------------------App.js ----------------duplicate id working version ----29-08-25------------------------------------
+// --------------------------------------------------App.js ----------------mirror camera setting ----01-09-25------------------------------------
 
 
 console.log('[INIT] Initializing DOM elements');
@@ -16,6 +16,12 @@ const muteBadge = document.getElementById('muteBadge');
 const videoOverlay = document.getElementById('videoOverlay');
 const openEmulatorBtn = document.getElementById('openEmulator');
 const clearMessagesBtn = document.getElementById('clearMessagesBtn');
+
+// Mirror helper for the scribe view
+function setMirror(on) {
+  if (!videoElement) return;
+  videoElement.classList.toggle('mirror', !!on);
+}
 
 console.log('[INIT] DOM elements initialized:', {
   videoElement,
@@ -108,7 +114,7 @@ const CLEAR_KEY = 'XR_CLEAR_ON_NEXT_CONNECT'; // '1' => wipe on next connect
 // ---------------- CONFIG ----------------
 console.log('[CONFIG] Loading configuration');
 // Update to your server URL as needed:
-// const SERVER_URL = 'https://92b17f55f54a.ngrok-free.app';
+// const SERVER_URL = 'https://87300aaf8fac.ngrok-free.app';
 
 const SERVER_URL = 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
 
@@ -698,6 +704,9 @@ function createPeerConnection() {
       remoteStream = new MediaStream();
       videoElement.srcObject = remoteStream;
       videoElement.muted = true;
+
+      // Mirror by default (front camera use-case)
+      setMirror(true);
     }
     if (!remoteStream.getTracks().some((t) => t.id === event.track.id)) {
       console.log('[WEBRTC] Adding track to remote stream');
