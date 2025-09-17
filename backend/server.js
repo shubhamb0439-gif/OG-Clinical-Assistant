@@ -9,6 +9,8 @@ const cors = require('cors');
 const { Server } = require('socket.io');
 const { createClient } = require('redis');
 const { createAdapter } = require('@socket.io/redis-adapter');
+const axios = require('axios'); // for SOAP note generation
+
 
 const dotenv = require('dotenv');
 const envCandidates = [
@@ -288,6 +290,73 @@ app.get('*', (req, res) => {
   }
 })();
 
+// -------------------- SOAP Note Generator --------------------
+async function generateSoapNote(transcript) {
+  try {
+    const prompt = `
+      Based on the provided transcript, generate a structured SOAP note.
+      Sections (always in this order):
+      - Chief Complaints
+      - History of Present Illness
+      - Subjective
+      - Objective
+      - Assessment
+      - Plan
+      - Medication
+
+      Rules:
+      - Each section should be an array of strings OR "No data available".
+      - If info missing, explicitly write "No data available".
+      - JSON only, no extra commentary.
+
+      Transcript:
+      ${transcript.trim()}
+    `;
+
+    const chatResponse = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model: 'gpt-4',
+        messages: [
+          { role: 'system', content: 'You are a helpful assistant skilled at creating structured SOAP notes.' },
+          { role: 'user', content: prompt },
+        ],
+      },
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${process.env.CHATGPT_API_KEY}`, // must be set in .env
+        },
+      }
+    );
+
+    const soapNoteContent = chatResponse.data.choices[0].message.content.trim();
+    const parsed = JSON.parse(soapNoteContent);
+
+    return {
+      "Chief Complaints": parsed["Chief Complaints"] || ["No data available"],
+      "History of Present Illness": parsed["History of Present Illness"] || ["No data available"],
+      "Subjective": parsed["Subjective"] || ["No data available"],
+      "Objective": parsed["Objective"] || ["No data available"],
+      "Assessment": parsed["Assessment"] || ["No data available"],
+      "Plan": parsed["Plan"] || ["No data available"],
+      "Medication": parsed["Medication"] || ["No data available"],
+    };
+  } catch (err) {
+    console.error('[SOAP_NOTE] generation failed:', err.message);
+    return {
+      "Chief Complaints": ["Error generating note"],
+      "History of Present Illness": ["Error generating note"],
+      "Subjective": ["Error generating note"],
+      "Objective": ["Error generating note"],
+      "Assessment": ["Error generating note"],
+      "Plan": ["Error generating note"],
+      "Medication": ["Error generating note"],
+    };
+  }
+}
+
+
 // -------------------- Socket.IO Handlers --------------------
 io.on('connection', (socket) => {
   console.log(`🔌 [CONNECTION] ${socket.id}`);
@@ -505,32 +574,47 @@ io.on('connection', (socket) => {
     const timestamp = data?.timestamp || new Date().toISOString();
 
     // ✳️ Intercept transcripts: forward to desktop's web console via a signal, then STOP
-    if (type === 'transcript') {
-      const out = {
-        type: 'transcript',
-        from,
-        to,
-        text,
-        final: !!data?.final,
-        timestamp,
-      };
+   if (type === 'transcript') {
+  const out = {
+    type: 'transcript',
+    from,
+    to,
+    text,
+    final: !!data?.final,
+    timestamp,
+  };
 
-      try {
-        if (to) {
-          // target the intended desktop only
-          io.to(roomOf(to)).emit('signal', { type: 'transcript_console', from, data: out });
-          dlog('[transcript] emitted signal "transcript_console" to', to);
-        } else if (socket.data?.roomId) {
-          // fallback: emit to current pair room
-          io.to(socket.data.roomId).emit('signal', { type: 'transcript_console', from, data: out });
-          dlog('[transcript] emitted signal "transcript_console" to room', socket.data.roomId);
-        }
-      } catch (e) {
-        dwarn('[transcript] emit failed:', e.message);
-      }
-
-      return; // do NOT broadcast as a normal "message"
+  try {
+    if (to) {
+      io.to(roomOf(to)).emit('signal', { type: 'transcript_console', from, data: out });
+      dlog('[transcript] emitted signal "transcript_console" to', to);
+    } else if (socket.data?.roomId) {
+      io.to(socket.data.roomId).emit('signal', { type: 'transcript_console', from, data: out });
+      dlog('[transcript] emitted signal "transcript_console" to room', socket.data.roomId);
     }
+
+    //  Generate SOAP note if this transcript is final
+    if (out.final && out.text) {
+      (async () => {
+        const soapNote = await generateSoapNote(out.text);
+
+        // Send SOAP note back to app.js  console
+        io.to(socket.data?.roomId || roomOf(to)).emit('signal', {
+          type: 'soap_note_console',
+          from,
+          data: soapNote,
+        });
+
+        console.log('[SOAP_NOTE]', JSON.stringify(soapNote, null, 2));
+      })();
+    }
+  } catch (e) {
+    dwarn('[transcript] emit failed:', e.message);
+  }
+
+  return; // stop normal message path
+}
+
 
     // Normal chat message path (unchanged)
     try {

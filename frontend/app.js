@@ -114,7 +114,7 @@ const CLEAR_KEY = 'XR_CLEAR_ON_NEXT_CONNECT'; // '1' => wipe on next connect
 // ---------------- CONFIG ----------------
 console.log('[CONFIG] Loading configuration');
 // Update to your server URL as needed:
-// const SERVER_URL = 'https://87300aaf8fac.ngrok-free.app';
+// const SERVER_URL = 'https://302745982b31.ngrok-free.app';
 
 const SERVER_URL = 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
 
@@ -560,11 +560,93 @@ window.addEventListener('beforeunload', () => {
 
 // ---------------- WebRTC & Messaging ----------------
 
+// function handleSignalMessage(data) {
+//   const type = data?.type;
+//   console.log('[SIGNAL] Received signal message:', type);
+
+//   // ✅ Console-only transcript aggregation (no partial logs; merged finals)
+//   if (type === 'transcript_console') {
+//     const p = data.data || {};
+//     const { from, to, text = '', final = false, timestamp } = p;
+
+//     const key = transcriptKey(from, to);
+//     const slot = (transcriptState.byKey[key] ||= {
+//       partial: '',
+//       paragraph: '',
+//       flushTimer: null,
+//       lastTs: 0,
+//     });
+
+//     // PARTIALS: store only, do NOT log (keeps console clean)
+//     if (!final) {
+//       slot.partial = text;                       // partials are cumulative
+//       slot.lastTs = Date.parse(timestamp) || Date.now();
+//       return; // no console output for partials
+//     }
+
+//     // FINALS: fold (partial + final) into one continuous paragraph
+//     const mergedFinal = mergeIncremental(slot.partial, text);
+//     slot.partial = '';
+
+//     // Accumulate finals into one paragraph (space between units)
+//     slot.paragraph = mergeIncremental(
+//       slot.paragraph ? (slot.paragraph + ' ') : '',
+//       mergedFinal
+//     );
+
+//     // Debounced flush: merge quick finals, then emit once
+//     if (slot.flushTimer) clearTimeout(slot.flushTimer);
+//     slot.flushTimer = setTimeout(() => {
+//       if (slot.paragraph) {
+//         // existing console log
+//         console.log(`[TRANSCRIPT] ${timestamp} final ${from} -> ${to}: "${slot.paragraph}"`);
+
+//         // NEW: mirror to cockpit via BroadcastChannel
+//         try {
+//           const bc = new BroadcastChannel('scribe-transcript');
+//           bc.postMessage({
+//             type: 'transcript_console',
+//             data: { from, to, text: slot.paragraph, final: true, timestamp }
+//           });
+//           // bc.close(); // optional
+//         } catch (e) {
+//           // ignore if BroadcastChannel not available
+//         }
+
+//         slot.paragraph = '';
+//       }
+//       slot.flushTimer = null;
+//     }, 1200);
+
+//     return; // don't fall through to WebRTC switch
+//   }
+
+//   // --- Existing WebRTC signaling (unchanged) ---
+//   switch (type) {
+//     case 'offer':
+//       console.log('[WEBRTC] 📞 Received offer from peer');
+//       handleOffer(data.data);
+//       break;
+//     case 'ice-candidate':
+//       console.log('[WEBRTC] ❄️ Received ICE candidate from peer');
+//       handleRemoteIceCandidate(data.data);
+//       break;
+//     case 'answer':
+//       console.log('[WEBRTC] Received answer (unexpected for desktop) – ignoring');
+//       break;
+//     default:
+//       console.log('[WEBRTC] Unhandled signal type:', type);
+//   }
+// }
+// ---------- Persistent BroadcastChannels ----------
+const transcriptBC = new BroadcastChannel('scribe-transcript');
+const soapBC = new BroadcastChannel('scribe-soap-note');
+
 function handleSignalMessage(data) {
   const type = data?.type;
   console.log('[SIGNAL] Received signal message:', type);
 
-  // ✅ Console-only transcript aggregation (no partial logs; merged finals)
+  // ---------- Transcript handling ----------
   if (type === 'transcript_console') {
     const p = data.data || {};
     const { from, to, text = '', final = false, timestamp } = p;
@@ -577,51 +659,49 @@ function handleSignalMessage(data) {
       lastTs: 0,
     });
 
-    // PARTIALS: store only, do NOT log (keeps console clean)
     if (!final) {
-      slot.partial = text;                       // partials are cumulative
+      slot.partial = text;
       slot.lastTs = Date.parse(timestamp) || Date.now();
-      return; // no console output for partials
+      return;
     }
 
-    // FINALS: fold (partial + final) into one continuous paragraph
     const mergedFinal = mergeIncremental(slot.partial, text);
     slot.partial = '';
 
-    // Accumulate finals into one paragraph (space between units)
-    slot.paragraph = mergeIncremental(
-      slot.paragraph ? (slot.paragraph + ' ') : '',
-      mergedFinal
-    );
+    slot.paragraph = mergeIncremental(slot.paragraph ? slot.paragraph + ' ' : '', mergedFinal);
 
-    // Debounced flush: merge quick finals, then emit once
     if (slot.flushTimer) clearTimeout(slot.flushTimer);
     slot.flushTimer = setTimeout(() => {
       if (slot.paragraph) {
-        // existing console log
         console.log(`[TRANSCRIPT] ${timestamp} final ${from} -> ${to}: "${slot.paragraph}"`);
-
-        // NEW: mirror to cockpit via BroadcastChannel
-        try {
-          const bc = new BroadcastChannel('scribe-transcript');
-          bc.postMessage({
-            type: 'transcript_console',
-            data: { from, to, text: slot.paragraph, final: true, timestamp }
-          });
-          // bc.close(); // optional
-        } catch (e) {
-          // ignore if BroadcastChannel not available
-        }
-
+        transcriptBC.postMessage({
+          type: 'transcript_console',
+          data: { from, to, text: slot.paragraph, final: true, timestamp },
+        });
         slot.paragraph = '';
       }
       slot.flushTimer = null;
     }, 1200);
 
-    return; // don't fall through to WebRTC switch
+    return;
   }
 
-  // --- Existing WebRTC signaling (unchanged) ---
+  // ---------- SOAP Note handling ----------
+  if (type === 'soap_note_console') {
+    const soap = data.data || {};
+    const ts = data.timestamp || Date.now();
+
+    console.log('[SOAP_NOTE] Received:', JSON.stringify(soap, null, 2));
+    soapBC.postMessage({
+      type: 'soap_note_console',
+      data: soap,
+      timestamp: ts,
+    });
+
+    return; // prevent fallthrough
+  }
+
+  // ---------- Existing WebRTC signaling ----------
   switch (type) {
     case 'offer':
       console.log('[WEBRTC] 📞 Received offer from peer');
@@ -638,6 +718,8 @@ function handleSignalMessage(data) {
       console.log('[WEBRTC] Unhandled signal type:', type);
   }
 }
+
+
 
 function handleChatMessage(msg) {
   console.log('[CHAT] Received chat message:', msg);

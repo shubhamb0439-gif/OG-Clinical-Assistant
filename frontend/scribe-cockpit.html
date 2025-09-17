@@ -3,6 +3,7 @@
 
 <head>
   <meta charset="UTF-8" />
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
   <title>XR Messaging Web App</title>
 
   <!-- App favicon -->
@@ -84,15 +85,17 @@
 
       </div>
 
-      <!-- Right: (available for anything else; leaving as-is) -->
+      <!-- Right: SOAP Note Panel -->
       <div class="flex-1 bg-gray-900/60 p-4 overflow-y-auto">
-        <!-- keep empty or add other panels here -->
+        <h2 class="text-xl font-bold mb-4">SOAP Note</h2>
+        <div id="soapNotePanel" class="space-y-4">
+          <!-- Populated dynamically by scribe-cockpit.js -->
+        </div>
       </div>
     </div>
   </div>
 
-  <!-- Cockpit logic (loads socket.io with local+public fallbacks and renders transcript) -->
+  <!-- Cockpit logic (loads socket.io with local+public fallbacks and renders transcript & soap note) -->
   <script src="./scribe-cockpit.js"></script>
 </body>
-
 </html>
