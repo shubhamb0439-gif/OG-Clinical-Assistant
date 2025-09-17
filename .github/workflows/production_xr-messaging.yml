@@ -63,6 +63,8 @@ jobs:
           slot-name: 'Production'
           package: release.zip
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_B711FBC961CA4D669DFD7810D502A2DE }}
+          enable-oryx-build: true
+
 
 
 
