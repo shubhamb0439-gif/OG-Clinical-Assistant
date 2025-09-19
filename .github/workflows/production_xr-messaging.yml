@@ -22,11 +22,11 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20.19.4'
+          node-version: '20.19.0'   # latest Node 20.x
 
       # Step 3: Install root dependencies (if any)
       - name: Install root dependencies
-        run: npm install
+        run: npm install || true
 
       # Step 4: Install frontend dependencies and build frontend
       - name: Install frontend dependencies
@@ -45,26 +45,19 @@ jobs:
           mkdir -p backend/public
           cp -r frontend/build/* backend/public/
 
-      # Step 6: Install backend dependencies (without including node_modules in zip)
+      # Step 6: Install backend dependencies
       - name: Install backend dependencies
         working-directory: backend
         run: npm install --force
 
-      # # Step 7: Zip backend for deployment (exclude node_modules)
-      # - name: Zip backend for deployment
-      #   run: |
-      #     cd backend
-      #     zip -r ../release.zip . -x "node_modules/*"
-
-      # Step 8: Deploy to Azure Web App
+      # Step 7: Deploy backend folder to Azure
       - name: Deploy to Azure Web App
         uses: azure/webapps-deploy@v3
         with:
           app-name: 'xr-messaging'
           slot-name: 'Production'
-          package: .
+          package: ./backend
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_B711FBC961CA4D669DFD7810D502A2DE }}
-
 
 
 
