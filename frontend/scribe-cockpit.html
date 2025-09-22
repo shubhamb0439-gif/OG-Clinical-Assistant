@@ -1,12 +1,10 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
   <meta charset="UTF-8" />
   <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
   <title>XR Messaging Web App</title>
 
-  <!-- App favicon -->
   <link rel="icon" type="image/png" sizes="512x512" href="xr-logo.png">
   <link rel="apple-touch-icon" href="xr-logo.png">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -20,7 +18,7 @@
           colors: {
             primary: '#4f46e5',
             urgent: '#dc2626',
-            overlay: 'rgba(0, 0, 0, 0.7)',
+            overlay: 'rgba(0,0,0,0.7)',
           }
         }
       }
@@ -36,6 +34,15 @@
     ];
   </script>
   -->
+
+  <style>
+    /* Grey, rounded scrollbars for inner scroll areas only */
+    .scribe-scroll::-webkit-scrollbar { width: 10px; }
+    .scribe-scroll::-webkit-scrollbar-track { background: #0b0f19; border-radius: 10px; }
+    .scribe-scroll::-webkit-scrollbar-thumb { background: #6b7280; border-radius: 10px; border: 2px solid #0b0f19; }
+    .scribe-scroll::-webkit-scrollbar-thumb:hover { background: #9ca3af; }
+    .scribe-scroll { scrollbar-width: thin; scrollbar-color: #6b7280 #0b0f19; }
+  </style>
 </head>
 
 <body class="bg-gradient-to-br from-gray-900 to-gray-800 text-white font-sans h-screen overflow-hidden">
@@ -50,52 +57,57 @@
     <!-- Top Bar -->
     <div class="flex justify-between items-center px-4 md:px-6 py-3 md:py-4 bg-gray-900 shadow-md z-10">
       <h1 class="text-xl md:text-2xl font-bold text-white">XR Dock</h1>
-
-      <!-- Mirrored status pill (read-only) -->
       <div class="flex gap-4 items-center">
         <span id="statusPill" class="px-3 py-1 rounded-full text-white text-xs md:text-base bg-yellow-500 select-none"
-          aria-live="polite" aria-label="Connection status: Connecting">
+              aria-live="polite" aria-label="Connection status: Connecting">
           Connecting
         </span>
       </div>
     </div>
 
-    <!-- Main -->
+    <!-- Main (no page scrollbars) -->
     <div class="flex-1 flex flex-col md:flex-row overflow-hidden">
 
-      <!-- Left: Connected Devices + Live Transcript -->
-      <div
-        class="w-full md:w-1/3 bg-gray-950/90 text-xs md:text-sm overflow-y-auto px-3 md:px-4 py-3 space-y-6 max-h-[40vh] md:max-h-full">
-
-        <!-- Connected Devices -->
-        <div>
-          <h3 class="text-base font-semibold mb-2">Connected Devices</h3>
+      <!-- LEFT: Devices (sticky) + Live Translation (sticky header) + Transcript list (scrolls) -->
+      <aside class="w-full md:w-1/3 bg-gray-950/90 text-xs md:text-sm px-3 md:px-4 py-3 flex flex-col overflow-hidden">
+        <!-- Connected Devices (constant) -->
+        <div class="pb-3 border-b border-white/10 sticky top-0 z-20 bg-gray-950/90">
+          <h3 class="text-base font-semibold">Connected Devices</h3>
           <ul id="deviceList" class="list-disc pl-5 text-gray-300 space-y-1">
             <!-- populated by scribe-cockpit.js -->
           </ul>
         </div>
 
-        <!-- Live Transcript (moved here under devices) -->
-        <div>
-          <h3 class="text-base font-semibold mb-2">Live Transcript</h3>
-          <div id="liveTranscript" class="space-y-2 text-sm md:text-base" aria-live="polite">
-            <!-- lines appended here by scribe-cockpit.js -->
+        <!-- Live Translation header (constant) -->
+        <div class="sticky top-[68px] md:top-[72px] z-10 bg-gray-950/90 py-2">
+          <h3 class="text-base font-semibold">Live Translation</h3>
+        </div>
+
+        <!-- Transcript list (inner scroll) -->
+        <div class="flex-1 min-h-0">
+          <div id="liveTranscript" class="scribe-scroll h-full overflow-y-auto px-1 py-2 space-y-2 text-sm md:text-base"
+               aria-live="polite">
+            <!-- transcript cards here -->
           </div>
         </div>
+      </aside>
 
-      </div>
-
-      <!-- Right: SOAP Note Panel -->
-      <div class="flex-1 bg-gray-900/60 p-4 overflow-y-auto">
-        <h2 class="text-xl font-bold mb-4">SOAP Note</h2>
-        <div id="soapNotePanel" class="space-y-4">
-          <!-- Populated dynamically by scribe-cockpit.js -->
+      <!-- RIGHT: SOAP Note -->
+      <main class="flex-1 bg-gray-900/60 overflow-hidden flex flex-col">
+        <!-- Constant header -->
+        <div class="sticky top-0 z-10 bg-gray-900/60 px-4 py-3 border-b border-white/10">
+          <h2 class="text-base md:text-lg font-semibold">SOAP Note</h2>
         </div>
-      </div>
+
+        <!-- SOAP content (inner scroll only) -->
+        <div id="soapNotePanel" class="flex-1 min-h-0">
+          <!-- Populated by scribe-cockpit.js -->
+        </div>
+      </main>
     </div>
   </div>
 
-  <!-- Cockpit logic (loads socket.io with local+public fallbacks and renders transcript & soap note) -->
+  <!-- Cockpit logic -->
   <script src="./scribe-cockpit.js"></script>
 </body>
 </html>
