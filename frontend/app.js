@@ -191,9 +191,9 @@ const CLEAR_KEY = 'XR_CLEAR_ON_NEXT_CONNECT'; // '1' => wipe on next connect
 // ---------------- CONFIG ----------------
 console.log('[CONFIG] Loading configuration');
 // Update to your server URL as needed:
-// const SERVER_URL = 'https://153ea94c123a.ngrok-free.app';  
+const SERVER_URL = 'https://153ea94c123a.ngrok-free.app';  
 
-const SERVER_URL = 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
+// const SERVER_URL = 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
 
 /* ------------- XR_ID / NAME init (updated) ------------- */
 // XR ID is editable from the front-end before connecting
