@@ -260,6 +260,11 @@ function broadcastPairs() {
   dlog('[PAIR] broadcastPairs:', pairs);
 }
 
+// Send the current pairs to a specific socket (or everyone by default) 25-09-25
+function emitRoomSnapshot(target = io) {
+  target.emit('room_update', { pairs: collectPairs() });
+}
+
 async function tryAutoPair(deviceId) {
   dlog('[AUTO_PAIR] attempt for', deviceId);
   const partnerId = PAIRINGS_MAP.get(deviceId);
@@ -566,19 +571,36 @@ io.on('connection', (socket) => {
     socket.emit('message_history', { type: 'message_history', messages: recent });
   }
 
-  // after sending message_history (or right at the top of the connection handler)
-  (async () => {
-    try {
-      // send current presence snapshot
-      const list = await buildDeviceListGlobal();
-      socket.emit('device_list', list);
+// ================================================25-09-25
+ (async () => {
+  try {
+    const list = await buildDeviceListGlobal();
+    socket.emit('device_list', list);
 
-      // send current active pair snapshot
-      socket.emit('room_update', { pairs: collectPairs() });
-    } catch (e) {
-      dwarn('[connection] initial snapshots failed:', e?.message || e);
-    }
-  })();
+    // send current active pair snapshot
+    emitRoomSnapshot(socket);
+  } catch (e) {
+    dwarn('[connection] initial snapshots failed:', e?.message || e);
+  }
+})();
+
+  // // after sending message_history (or right at the top of the connection handler)
+  // (async () => {
+  //   try {
+  //     // send current presence snapshot
+  //     const list = await buildDeviceListGlobal();
+  //     socket.emit('device_list', list);
+
+  //     // send current active pair snapshot
+  //     socket.emit('room_update', { pairs: collectPairs() });
+  //   } catch (e) {
+  //     dwarn('[connection] initial snapshots failed:', e?.message || e);
+  //   }
+  // })();
+
+ 
+
+  
 
   // -------- join --------
   socket.on('join', (xrId) => {
@@ -597,6 +619,11 @@ io.on('connection', (socket) => {
       }
     })();
   });
+
+   // ✅ Give this newly joined socket the current pairing snapshot===============25-09-25
+  emitRoomSnapshot(socket);
+});
+
 
 
   // -------- identify --------
