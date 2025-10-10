@@ -56,7 +56,7 @@ const LS_KEYS = {
 };
 
 // Endpoints (can override via window.SCRIBE_PUBLIC_ENDPOINTS)
-const NGROK_URL =  'https://6c04e2296074.ngrok-free.app';
+const NGROK_URL =  'https://428c76f0defe.ngrok-free.app';
 const AZURE_URL = 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
 const OVERRIDES = Array.isArray(window.SCRIBE_PUBLIC_ENDPOINTS) ? window.SCRIBE_PUBLIC_ENDPOINTS : null;
 
@@ -69,7 +69,7 @@ const preferred = isLocal ? NGROK : AZURE;
 const fallback  = isLocal ? AZURE : NGROK;
 
 let SERVER_URL = null;
-let socket     = null;
+let socket     = null; 
 
 // In-memory UI state
 let latestSoapNote = {};                   // last received/edited SOAP payload
@@ -235,7 +235,6 @@ function createTranscriptCard(item){
   if(id === loadActiveItemId()) card.classList.add('scribe-card-active');
   return card;
 }
-
 function applyClamp(el,collapse=true){
   if(collapse){
     el.dataset.collapsed='true';
@@ -253,13 +252,11 @@ function applyClamp(el,collapse=true){
     el.style.maxHeight='none';
   }
 }
-
 function highlightActiveCard(){
   transcriptEl.querySelectorAll('.scribe-card').forEach(c=>c.classList.remove('scribe-card-active'));
   const active = transcriptEl.querySelector(`.scribe-card[data-id="${CSS.escape(loadActiveItemId())}"]`);
   if(active) active.classList.add('scribe-card-active');
 }
-
 function setActiveTranscriptId(id){
   currentActiveItemId = id;
   saveActiveItemId(id);
@@ -270,7 +267,6 @@ function setActiveTranscriptId(id){
   latestSoapNote = Object.keys(soap).length ? soap : loadLatestSoap();
   if(!soapGenerating) renderSoapNote(latestSoapNote);
 }
-
 function trimTranscriptIfNeeded(){
   const cards = transcriptEl.querySelectorAll('.scribe-card');
   if(cards.length > MAX_TRANSCRIPT_LINES){
@@ -866,7 +862,7 @@ function restoreFromLocalStorage(){
   else{
     removeTranscriptPlaceholder();
     history.forEach(item => transcriptEl.appendChild(createTranscriptCard(item)));
-  }
+  } 
 
   // SOAP
   latestSoapNote = loadLatestSoap();

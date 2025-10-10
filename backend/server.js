@@ -1,4 +1,4 @@
- // -------------------- Imports & Env --------------------
+// -------------------- Imports & Env --------------------
 const express = require('express');
 const http = require('http');
 const path = require('path');
@@ -516,25 +516,63 @@ async function generateSoapNote(transcript) {
       ${transcript.trim()}
     `;
 
-    const chatResponse = await axios.post(
-      'https://api.openai.com/v1/chat/completions',
-      {
-        model: 'gpt-4',
-        messages: [
-          { role: 'system', content: 'You are a helpful assistant skilled at creating structured SOAP notes.' },
-          { role: 'user', content: prompt },
-        ],
-      },
-      {
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.CHATGPT_API_KEY}`, // must be set in .env
-        },
-      }
-    );
+    // ADDED: Use Abacus.AI RouteLLM instead of OpenAI
+    const ABACUS_API_KEY = process.env.ABACUS_API_KEY; // ADDED
+    if (!ABACUS_API_KEY) throw new Error('Missing ABACUS_API_KEY in environment');
+    const ABACUS_MODEL = ((process.env.ABACUS_MODEL).trim());
+    const ABACUS_TEMPERATURE = Number(process.env.ABACUS_TEMPERATURE); 
+    let llmEndpoint = (process.env.ABACUS_LLM_ENDPOINT || '').trim(); 
+    if (!llmEndpoint) { 
+      const epRes = await axios.get('https://api.abacus.ai/api/v0/getApiEndpoint', { 
+        headers: { 'apiKey': ABACUS_API_KEY }, 
+      }); 
+      llmEndpoint = epRes?.data?.result?.llmEndpoint;
+    } 
+    if (!llmEndpoint) throw new Error('Could not resolve Abacus.AI LLM endpoint'); 
 
-    const soapNoteContent = chatResponse.data.choices[0].message.content.trim();
-    const parsed = JSON.parse(soapNoteContent);
+    const base = llmEndpoint.replace(/\/$/, ''); 
+
+    // ADDED: OpenAI-compatible Chat Completions request body
+    const reqBody = { 
+      model: ABACUS_MODEL,
+      messages: [ 
+        { role: 'system', content: 'You are a helpful assistant skilled at creating structured SOAP notes.' }, 
+        { role: 'user', content: prompt },
+      ], 
+      temperature: ABACUS_TEMPERATURE,
+    }; 
+    let chatResponse;
+    try { 
+      chatResponse = await axios.post(`${base}/v1/chat/completions`, reqBody, { 
+        headers: { 'Content-Type': 'application/json', 'apiKey': ABACUS_API_KEY },
+      });
+    } catch (e) {
+      chatResponse = await axios.post(`${base}/chat/completions`, reqBody, {
+        headers: { 'Content-Type': 'application/json', 'apiKey': ABACUS_API_KEY },
+      });
+    }
+    const rawContent = (
+      chatResponse?.data?.choices?.[0]?.message?.content?.trim() ||
+      chatResponse?.data?.choices?.[0]?.text?.trim() ||
+      chatResponse?.data?.output_text?.trim() ||
+      ''
+    );
+    const soapNoteContent = rawContent
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '');
+
+    let parsed;
+    try {
+      parsed = JSON.parse(soapNoteContent);
+    } catch (e) {
+      const first = soapNoteContent.indexOf('{'); 
+      const last = soapNoteContent.lastIndexOf('}'); 
+      if (first !== -1 && last !== -1) { 
+        parsed = JSON.parse(soapNoteContent.slice(first, last + 1)); 
+      } else {
+        throw e; 
+      } 
+    }
 
     return {
       "Chief Complaints": parsed["Chief Complaints"] || ["No data available"],
@@ -1236,6 +1274,3 @@ function shutdown() {
     process.exit(1);
   }
 }
-
-
-
