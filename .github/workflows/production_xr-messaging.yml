@@ -48,7 +48,8 @@ jobs:
         with:
           app-name: xr-messaging
           slot-name: production
-          package: .
+          package: ./desktop-web/backend
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_D6D0F44F5A774D408C405532F9EA0817 }}
+
 
 
