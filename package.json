@@ -1,23 +1,21 @@
 {
-  "name": "xr-messaging-root",
+  "name": "xr-root",
+  "private": true,
   "version": "1.0.0",
-  "description": "XR Messaging System root configuration",
+  "description": "XR Vision root runner",
   "scripts": {
-    "start": "npm-run-all --parallel start:server start:frontend",
-    "start:server": "cd backend && npm start",
-    "start:frontend": "cd frontend && npm start"
+    "start": "npm-run-all --parallel start:hub start:web",
+    "start:hub": "npm --prefix desktop-web/backend start",
+    "start:web": "npm --prefix device-pwa/backend start",
+
+    "dev": "npm-run-all --parallel dev:hub dev:web",
+    "dev:hub": "npm --prefix desktop-web/backend run dev",
+    "dev:web": "npm --prefix device-pwa/backend run dev",
+
+    "bootstrap": "npm --prefix desktop-web/backend install && npm --prefix device-pwa/backend install"
   },
   "devDependencies": {
-    "concurrently": "^9.2.0",
     "npm-run-all": "^4.1.5"
-  },
-  "dependencies": {
-    "axios": "^1.11.0",
-    "cors": "^2.8.5",
-    "dotenv": "^17.2.1",
-    "express": "^5.1.0",
-    "socket.io": "^4.8.1",
-    "socket.io-client": "^4.8.1"
   },
   "author": "Your Name",
   "license": "MIT"

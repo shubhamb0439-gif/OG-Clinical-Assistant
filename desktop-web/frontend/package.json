@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "xr-root": "file:../.."
+  }
+}

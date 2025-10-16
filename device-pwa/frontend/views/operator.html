@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>XR Vision — Operator</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="manifest" href="/public/manifest.webmanifest">
+    <link rel="stylesheet" href="/public/css/common.css" />
+    <link rel="stylesheet" href="/public/css/device.css" />
+    <link rel="icon" type="image/png" sizes="512x512" href="/public/images/xr-logo.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/public/images/xr-logo.png">
+    <style>
+        /* small operator-specific tweaks */
+        .preview {
+            background: #000;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+
+        .metric {
+            padding: 8px;
+            background: #fff;
+            border-radius: 10px;
+        }
+
+        .metric .label {
+            font-size: 12px;
+            color: var(--color-muted);
+        }
+
+        .metric .value {
+            font-weight: 700;
+            font-size: 16px;
+        }
+
+        .row {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .select {
+            height: 40px;
+            border: 1px solid #cfd8dc;
+            border-radius: 10px;
+            padding: 0 10px;
+        }
+
+        .overlay {
+            position: absolute;
+            inset: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(transparent, rgba(0, 0, 0, .6));
+            pointer-events: none;
+        }
+
+        .overlay .tip {
+            pointer-events: auto;
+            background: #111827;
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, .15);
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+
+        <header class="header">
+            <h1>XR Vision — Operator</h1>
+            <div id="status" class="status status-disconnected">Status: Disconnected</div>
+        </header>
+
+        <!-- Controls -->
+        <section class="card controls" style="grid-column:1/-1">
+            <div class="row">
+                <button id="btnConnect" class="chip-btn">Connect</button>
+                <select id="selDevice" class="select" title="Select Device"></select>
+                <button id="btnRequestStart" class="btn-outline">Request Start</button>
+                <button id="btnHangup" class="btn-outline">Hang Up</button>
+            </div>
+        </section>
+
+        <!-- Remote stream -->
+        <section class="card preview" style="grid-column:1/-1; height:320px">
+            <video id="remoteVideo" autoplay playsinline muted></video>
+            <div id="noVideo" class="preview-empty">Waiting for stream…</div>
+            <div id="overlayTip" class="overlay hidden">
+                <button id="btnUnmute" class="tip">Click to enable audio</button>
+            </div>
+        </section>
+
+        <!-- Metrics -->
+        <section class="card" style="grid-column:1/-1">
+            <h2 style="margin:0 0 8px 0; font-size:18px">Telemetry</h2>
+            <div class="metrics-grid">
+                <div class="metric">
+                    <div class="label">Conn Type</div>
+                    <div id="mConn" class="value">–</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Bitrate (kbps)</div>
+                    <div id="mBitrate" class="value">–</div>
+                </div>
+                <div class="metric">
+                    <div class="label">RTT (ms)</div>
+                    <div id="mRtt" class="value">–</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Loss (%)</div>
+                    <div id="mLoss" class="value">–</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Battery</div>
+                    <div id="mBattery" class="value">–</div>
+                </div>
+                <div class="metric">
+                    <div class="label">Downlink (Mbps)</div>
+                    <div id="mDown" class="value">–</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Messages -->
+        <section class="messages card" style="grid-column:1/-1">
+            <h2>Messages</h2>
+            <div id="msgList" class="msg-list"></div>
+        </section>
+
+        <!-- Composer -->
+        <section class="composer" style="grid-column:1/-1">
+            <input id="msgInput" class="input" placeholder="Type a message to device…" />
+            <label class="urgent">
+                <input id="chkUrgent" type="checkbox" />
+                <span>Urgent</span>
+            </label>
+            <button id="btnSend" class="btn-send">Send</button>
+        </section>
+
+    </div>
+
+    <!-- Socket.IO -->
+    <script src="/socket.io/socket.io.js"></script>
+
+    <script type="module">
+        import { SignalingClient } from '/public/js/signaling.js';
+        import { Message, appendMessage } from '/public/js/messages.js';
+
+        // ---------- Constants ----------
+        const DESKTOP_XR_ID = 'XR-1238';   // me (operator)
+        const SERVER_URL = location.origin;
+
+        // Same TURN/STUN set as device
+        const ICE_SERVERS = [
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+            {
+                urls: [
+                    'turns:relay1.expressturn.com:5349',
+                    'turn:relay1.expressturn.com:3478?transport=tcp'
+                ],
+                username: '000000002071025048',
+                credential: 'kRyX+FubO3gpvRDgS3MaPgf03Y='
+            }
+        ];
+
+        // ---------- Elements ----------
+        const elStatus = document.getElementById('status');
+        const elConnect = document.getElementById('btnConnect');
+        const elDeviceSel = document.getElementById('selDevice');
+        const elRequestStart = document.getElementById('btnRequestStart');
+        const elHangup = document.getElementById('btnHangup');
+
+        const elVid = document.getElementById('remoteVideo');
+        const elNoVideo = document.getElementById('noVideo');
+        const elOverlay = document.getElementById('overlayTip');
+        const elUnmute = document.getElementById('btnUnmute');
+
+        const elMsgList = document.getElementById('msgList');
+        const elMsgInput = document.getElementById('msgInput');
+        const elChkUrgent = document.getElementById('chkUrgent');
+        const elBtnSend = document.getElementById('btnSend');
+
+        const mConn = document.getElementById('mConn');
+        const mBitrate = document.getElementById('mBitrate');
+        const mRtt = document.getElementById('mRtt');
+        const mLoss = document.getElementById('mLoss');
+        const mBattery = document.getElementById('mBattery');
+        const mDown = document.getElementById('mDown');
+
+        // ---------- State ----------
+        let signaling = null;
+        let isConnected = false;
+        let selectedDeviceId = null;
+
+        /** @type {RTCPeerConnection|null} */
+        let pc = null;
+        let pendingOfferFrom = null;
+
+        // ---------- Helpers ----------
+        const nowIso = () => new Date().toISOString();
+        function setStatus(ok) {
+            isConnected = ok;
+            elStatus.textContent = ok ? 'Status: Connected' : 'Status: Disconnected';
+            elStatus.classList.toggle('status-connected', ok);
+            elStatus.classList.toggle('status-disconnected', !ok);
+            elConnect.textContent = ok ? 'Disconnect' : 'Connect';
+        }
+
+        function logMsg(sender, text, urgent = false, xrId = selectedDeviceId) {
+            appendMessage(elMsgList, new Message({ sender, text, timestamp: nowIso(), xrId: xrId || 'unknown', urgent }));
+            elMsgList.scrollTop = elMsgList.scrollHeight;
+        }
+
+        function setStreamVisible(on) {
+            elNoVideo.hidden = !!on;
+            if (!on) {
+                elVid.srcObject = null;
+            }
+        }
+
+        function ensurePc() {
+            if (pc) return pc;
+            pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+            pc.onicecandidate = (e) => {
+                const c = e.candidate;
+                if (!c || !selectedDeviceId) return;
+                signaling.sendIceCandidate(
+                    { candidate: c.candidate, sdpMid: c.sdpMid, sdpMLineIndex: c.sdpMLineIndex },
+                    DESKTOP_XR_ID, selectedDeviceId
+                );
+            };
+
+            pc.ontrack = (ev) => {
+                const [stream] = ev.streams;
+                elVid.srcObject = stream;
+                setStreamVisible(true);
+                // Many browsers require a gesture to play audio; show unmute tip
+                if (elVid.muted) {
+                    elOverlay.classList.remove('hidden');
+                }
+            };
+
+            pc.onconnectionstatechange = () => {
+                if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+                    setStreamVisible(false);
+                }
+            };
+
+            return pc;
+        }
+
+        async function applyOfferCreateAnswer(offer, fromId) {
+            try {
+                pendingOfferFrom = fromId;
+                const pcx = ensurePc();
+                await pcx.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: offer.sdp }));
+                // Ensure we are recvonly
+                try {
+                    pcx.getTransceivers().forEach(t => { if (t.direction !== 'recvonly') t.direction = 'recvonly'; });
+                } catch { }
+                const answer = await pcx.createAnswer();
+                await pcx.setLocalDescription(answer);
+                signaling.sendAnswer({ type: 'answer', sdp: answer.sdp }, DESKTOP_XR_ID, fromId);
+                logMsg('System', `Answered offer from ${fromId}`);
+            } catch (e) {
+                console.error('applyOfferCreateAnswer failed', e);
+                logMsg('System', 'Error answering offer (see console)');
+            }
+        }
+
+        function hangup() {
+            if (pc) {
+                try { pc.getSenders().forEach(s => s.track && (s.track.enabled = false)); } catch { }
+                try { pc.close(); } catch { }
+                pc = null;
+            }
+            setStreamVisible(false);
+            logMsg('System', 'Call ended.');
+        }
+
+        // ---------- Signaling ----------
+        function connectSignaling() {
+            signaling = new SignalingClient({
+                serverUrl: SERVER_URL,
+                deviceName: 'XR-Desktop',
+                xrId: DESKTOP_XR_ID
+            });
+
+            signaling.listener = {
+                onConnected: () => {
+                    setStatus(true);
+                    logMsg('System', 'Connected to server');
+                },
+                onDisconnected: () => {
+                    setStatus(false);
+                    hangup();
+                    logMsg('System', 'Disconnected from server');
+                },
+                onDeviceListUpdated: (pairs) => {
+                    // pairs: [ [name,xrId], ... ]
+                    const old = selectedDeviceId;
+                    elDeviceSel.innerHTML = '';
+                    for (const [name, id] of pairs) {
+                        const opt = document.createElement('option');
+                        opt.value = id; opt.textContent = `${name} [${id}]`;
+                        elDeviceSel.appendChild(opt);
+                    }
+                    // Prefer XR-1234 first if present
+                    const preferred = pairs.find(([_, id]) => String(id).toUpperCase() === 'XR-1234');
+                    selectedDeviceId = preferred?.[1] || (pairs[0]?.[1]) || null;
+                    if (selectedDeviceId) elDeviceSel.value = selectedDeviceId;
+                    if (selectedDeviceId && selectedDeviceId !== old) {
+                        logMsg('System', `Selected device ${selectedDeviceId}`);
+                    }
+                },
+                onSignal: (type, from, to, data) => {
+                    if (!from) return;
+                    // Quality updates from device (broadcast)
+                    if (type === 'webrtc_quality_update') {
+                        if (!selectedDeviceId || from !== selectedDeviceId) return;
+                        const s = data?.samples?.[0] || {};
+                        if (Number.isFinite(s.bitrateKbps)) mBitrate.textContent = s.bitrateKbps;
+                        if (Number.isFinite(s.rttMs)) mRtt.textContent = s.rttMs;
+                        if (Number.isFinite(s.lossPct)) mLoss.textContent = s.lossPct.toFixed(2);
+                        return;
+                    }
+
+                    // Incoming offer from device -> we answer
+                    if (type === 'offer') {
+                        if (!selectedDeviceId || from !== selectedDeviceId) {
+                            // If no device selected yet, adopt the first that offers
+                            if (!selectedDeviceId) { selectedDeviceId = from; elDeviceSel.value = from; }
+                            else return; // ignore offers from other devices
+                        }
+                        applyOfferCreateAnswer(data, from);
+                        return;
+                    }
+
+                    // Remote ICE from device to us
+                    if (type === 'ice-candidate') {
+                        if (from !== selectedDeviceId || !pc) return;
+                        try {
+                            pc.addIceCandidate(new RTCIceCandidate({
+                                candidate: data.candidate,
+                                sdpMid: data.sdpMid,
+                                sdpMLineIndex: data.sdpMLineIndex
+                            }));
+                        } catch (e) { console.warn('addIceCandidate failed', e); }
+                        return;
+                    }
+                },
+                onServerMessage: (event, payload) => {
+                    if (event !== 'message') return;
+                    if (payload?.type === 'transcript') {
+                        // show as non-urgent message from device
+                        const txt = `[Transcript${payload?.final ? ' (final)' : ''}] ${payload?.text || ''}`;
+                        appendMessage(elMsgList, new Message({
+                            sender: payload?.sender || 'Device',
+                            text: txt, timestamp: payload?.timestamp || nowIso(),
+                            xrId: payload?.xrId || selectedDeviceId || 'device',
+                            urgent: false
+                        }));
+                        elMsgList.scrollTop = elMsgList.scrollHeight;
+                        return;
+                    }
+                    const m = new Message({
+                        sender: payload?.sender || payload?.from || 'Device',
+                        text: payload?.text || payload?.message || JSON.stringify(payload),
+                        timestamp: payload?.timestamp || nowIso(),
+                        xrId: payload?.xrId || selectedDeviceId || 'device',
+                        urgent: !!(payload?.urgent || payload?.priority === 'urgent')
+                    });
+                    appendMessage(elMsgList, m);
+                    elMsgList.scrollTop = elMsgList.scrollHeight;
+                }
+            };
+
+            signaling.connect();
+        }
+
+        // ---------- UI bindings ----------
+        elConnect.addEventListener('click', () => {
+            if (!isConnected) {
+                connectSignaling();
+            } else {
+                signaling?.close();
+            }
+        });
+
+        elDeviceSel.addEventListener('change', () => {
+            selectedDeviceId = elDeviceSel.value || null;
+            logMsg('System', `Selected device ${selectedDeviceId}`);
+            hangup(); // reset any existing call; next offer will attach
+        });
+
+        elRequestStart.addEventListener('click', () => {
+            if (!isConnected || !selectedDeviceId) { logMsg('System', 'Select a device first'); return; }
+            signaling.socket?.emit('control', { from: DESKTOP_XR_ID, to: selectedDeviceId, command: 'start_stream' });
+            logMsg('System', 'Requested stream start');
+        });
+
+        elHangup.addEventListener('click', () => {
+            hangup();
+            if (isConnected && selectedDeviceId) {
+                signaling.socket?.emit('control', { from: DESKTOP_XR_ID, to: selectedDeviceId, command: 'stop_stream' });
+            }
+        });
+
+        elUnmute.addEventListener('click', () => {
+            try { elVid.muted = false; elVid.play().catch(() => { }); } catch { }
+            elOverlay.classList.add('hidden');
+        });
+
+        elBtnSend.addEventListener('click', () => {
+            const text = (elMsgInput.value || '').trim();
+            const urgent = !!elChkUrgent.checked;
+            if (!text) return;
+            if (!isConnected || !selectedDeviceId) { logMsg('System', 'Select a device first'); return; }
+
+            const payload = {
+                type: 'message',
+                text, urgent,
+                sender: 'XR-Desktop',
+                xrId: DESKTOP_XR_ID,
+                timestamp: nowIso(),
+                to: selectedDeviceId,
+                from: DESKTOP_XR_ID
+            };
+            signaling.socket?.emit('message', payload);
+            elMsgInput.value = ''; elChkUrgent.checked = false;
+        });
+
+        // Telemetry broadcast handler (from server) — we only display for selected device
+        if (window.io) {
+            // Also listen directly on the raw socket once connected
+            const attachTelemetry = () => {
+                if (!signaling?.socket) { setTimeout(attachTelemetry, 300); return; }
+                signaling.socket.on('telemetry', (p) => {
+                    if (!p) return;
+                    if (selectedDeviceId && p.xrId && String(p.xrId) !== String(selectedDeviceId)) return;
+                    if (p.connType) mConn.textContent = p.connType;
+                    if (Number.isFinite(p.netDownMbps)) mDown.textContent = p.netDownMbps;
+                    if (Number.isFinite(p.batteryLevel)) mBattery.textContent = Math.round(p.batteryLevel * 100) + '%';
+                });
+                signaling.socket.on('battery', (b) => {
+                    if (!b) return;
+                    if (selectedDeviceId && b.xrId && String(b.xrId) !== String(selectedDeviceId)) return;
+                    if (Number.isFinite(b.batteryPct)) mBattery.textContent = b.batteryPct + '%';
+                });
+            };
+            attachTelemetry();
+        }
+
+        // PWA SW registration
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('/sw.js').catch(() => { });
+
+        }
+
+        // Initial UI
+        setStatus(false);
+        setStreamVisible(false);
+    </script>
+</body>
+
+</html>
