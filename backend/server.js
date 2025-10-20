@@ -111,13 +111,6 @@ if (fs.existsSync(backendPublic)) {
 } else {
   dlog('[STATIC] backend/public not found');
 }
-const frontendPublic = path.join(__dirname, 'frontend', 'public');
-if (fs.existsSync(frontendPublic)) {
-  app.use('/public', express.static(frontendPublic));  // <-- key line
-  console.log(`[STATIC] /public -> ${frontendPublic}`);
-} else {
-  console.warn('[STATIC] frontend/public not found — /public/* will 404');
-}
 // -------------------- TURN Injection --------------------
 function injectTurnConfig(html) {
   dlog('[TURN] injectTurnConfig start');
