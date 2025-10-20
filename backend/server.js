@@ -103,19 +103,21 @@ if (!IS_PROD) {
     next();
   });
 }
-
 // -------------------- Static --------------------
-
-// -------------------- Static --------------------
-// Frontend now serves all UI. Do NOT expose ../frontend here.
 const backendPublic = path.join(__dirname, 'public');
 if (fs.existsSync(backendPublic)) {
-  app.use(express.static(backendPublic)); // keep only if you really have backend-only assets
+  app.use(express.static(backendPublic));
   console.log(`[STATIC] Serving static from ${backendPublic}`);
 } else {
   dlog('[STATIC] backend/public not found');
 }
-
+const frontendPublic = path.join(__dirname, 'frontend', 'public');
+if (fs.existsSync(frontendPublic)) {
+  app.use('/public', express.static(frontendPublic));  // <-- key line
+  console.log(`[STATIC] /public -> ${frontendPublic}`);
+} else {
+  console.warn('[STATIC] frontend/public not found — /public/* will 404');
+}
 // -------------------- TURN Injection --------------------
 function injectTurnConfig(html) {
   dlog('[TURN] injectTurnConfig start');
