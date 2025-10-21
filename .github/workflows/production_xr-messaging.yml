@@ -33,7 +33,6 @@ jobs:
       - name: Copy frontend to backend/public
         run: |
           mkdir -p backend/public
-          cp -r frontend/views/* backend/public/
           cp -r frontend/public/* backend/public/
 
       # Step 5: Deploy backend to Azure
@@ -44,6 +43,7 @@ jobs:
           slot-name: 'Production'
           package: ./backend
           publish-profile: ${{ secrets.AZUREAPPSERVICE_PUBLISHPROFILE_D6D0F44F5A774D408C405532F9EA0817 }}
+
 
 
 
