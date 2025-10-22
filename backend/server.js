@@ -84,15 +84,73 @@ app.use(cors());
 app.use(express.json());
 console.log('[MIDDLEWARE] CORS + JSON enabled');
 
-// -------------------- UI routes (migrated from frontend/server.js) --------------------
-// Point these to your FRONTEND folders on disk:
-const VIEWS_DIR = path.join(__dirname, '../frontend/views');
-const PUBLIC_DIR = path.join(__dirname, '../frontend/public');
+// // -------------------- UI routes (migrated from frontend/server.js) --------------------
+// // Point these to your FRONTEND folders on disk:
+// const VIEWS_DIR = path.join(__dirname, '../frontend/views');
+// const PUBLIC_DIR = path.join(__dirname, '../frontend/public');
 
-// Serve static assets (CSS/JS/images) under /public
+// // Serve static assets (CSS/JS/images) under /public
+// app.use('/public', express.static(PUBLIC_DIR));
+
+// // Keep HTML fresh (optional, safe for XR flows)
+// app.use((req, res, next) => {
+//   if (req.method === 'GET' && (req.headers.accept || '').includes('text/html')) {
+//     res.set('Cache-Control', 'no-store');
+//   }
+//   next();
+// });
+
+// const sendView = (name) => (_req, res) => res.sendFile(path.join(VIEWS_DIR, name));
+// const sendPublic = (name) => (_req, res) => res.sendFile(path.join(PUBLIC_DIR, name));
+
+// // PWA top-level files (keep at root paths)
+// app.get('/manifest.webmanifest', sendPublic('manifest.webmanifest'));
+// // ✅ Fix: alias /sw.js → use existing file public/js/sw-device.js
+// app.get('/sw.js', (req, res) => {
+//   res.type('application/javascript');
+//   res.sendFile(path.join(PUBLIC_DIR, 'js', 'sw-device.js'));
+// });
+
+// // PWA (Device-only) files
+// app.get('/device.webmanifest', (req, res) => {
+//   res.type('webmanifest');
+//   res.sendFile(path.join(PUBLIC_DIR, 'device.webmanifest'));
+// });
+
+// app.get('/device/sw.js', (req, res) => {
+//   // scope service worker to /device/
+//   res.set('Service-Worker-Allowed', '/device/');
+//   res.type('application/javascript');
+//   res.sendFile(path.join(PUBLIC_DIR, 'js', 'sw-device.js'));
+// });
+
+
+
+// // Pretty routes → views
+// app.get(['/device', '/device/'], sendView('device.html'));
+// app.get(['/dashboard', '/dashboard/'], sendView('dashboard.html'));
+// app.get(['/scribe-cockpit', '/scribe-cockpit/'], sendView('scribe-cockpit.html'));
+// // (optional legacy)
+// app.get(['/operator', '/operator/'], sendView('operator.html'));
+
+
+
+// // Root route → views/index.html
+// app.get('/', sendView('index.html'));
+
+// 🧩 Paths
+const FRONTEND_VIEWS = path.join(__dirname, '..', 'frontend', 'views');
+const FRONTEND_PUBLIC = path.join(__dirname, '..', 'frontend', 'public');
+const BACKEND_PUBLIC = path.join(__dirname, 'public');
+
+// 🧠 Choose which directory actually exists
+const VIEWS_DIR = fs.existsSync(FRONTEND_VIEWS) ? FRONTEND_VIEWS : BACKEND_PUBLIC;
+const PUBLIC_DIR = fs.existsSync(FRONTEND_PUBLIC) ? FRONTEND_PUBLIC : BACKEND_PUBLIC;
+
 app.use('/public', express.static(PUBLIC_DIR));
+console.log(`[STATIC] Serving UI assets from ${PUBLIC_DIR}`);
 
-// Keep HTML fresh (optional, safe for XR flows)
+// Keep HTML fresh (safe for XR flows)
 app.use((req, res, next) => {
   if (req.method === 'GET' && (req.headers.accept || '').includes('text/html')) {
     res.set('Cache-Control', 'no-store');
@@ -100,44 +158,43 @@ app.use((req, res, next) => {
   next();
 });
 
-const sendView = (name) => (_req, res) => res.sendFile(path.join(VIEWS_DIR, name));
-const sendPublic = (name) => (_req, res) => res.sendFile(path.join(PUBLIC_DIR, name));
+const sendView = (name) => (_req, res) => {
+  const filePath = path.join(VIEWS_DIR, name);
+  if (fs.existsSync(filePath)) {
+    res.sendFile(filePath);
+  } else {
+    console.warn(`[WARN] Missing view: ${filePath}`);
+    res.status(404).send(`View not found: ${name}`);
+  }
+};
 
-// PWA top-level files (keep at root paths)
-app.get('/manifest.webmanifest', sendPublic('manifest.webmanifest'));
-// ✅ Fix: alias /sw.js → use existing file public/js/sw-device.js
-app.get('/sw.js', (req, res) => {
+// PWA top-level files (manifest, service worker)
+app.get('/manifest.webmanifest', (_req, res) =>
+  res.sendFile(path.join(PUBLIC_DIR, 'manifest.webmanifest'))
+);
+
+app.get('/sw.js', (_req, res) => {
   res.type('application/javascript');
   res.sendFile(path.join(PUBLIC_DIR, 'js', 'sw-device.js'));
 });
 
-// PWA (Device-only) files
-app.get('/device.webmanifest', (req, res) => {
+app.get('/device.webmanifest', (_req, res) => {
   res.type('webmanifest');
   res.sendFile(path.join(PUBLIC_DIR, 'device.webmanifest'));
 });
 
-app.get('/device/sw.js', (req, res) => {
-  // scope service worker to /device/
+app.get('/device/sw.js', (_req, res) => {
   res.set('Service-Worker-Allowed', '/device/');
   res.type('application/javascript');
   res.sendFile(path.join(PUBLIC_DIR, 'js', 'sw-device.js'));
 });
 
-
-
 // Pretty routes → views
 app.get(['/device', '/device/'], sendView('device.html'));
 app.get(['/dashboard', '/dashboard/'], sendView('dashboard.html'));
 app.get(['/scribe-cockpit', '/scribe-cockpit/'], sendView('scribe-cockpit.html'));
-// (optional legacy)
 app.get(['/operator', '/operator/'], sendView('operator.html'));
-
-
-
-// Root route → views/index.html
 app.get('/', sendView('index.html'));
-
 
 
 
