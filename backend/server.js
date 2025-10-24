@@ -578,62 +578,43 @@ app.post('/api/medications/availability', async (req, res) => {
   }
 });
 
-const AZURE_ENV = process.env.AZURE_ENV || 'LOCAL';
-const isProd = AZURE_ENV === 'PRODUCTION';
-
-const base = {
-  host: process.env.DB_SERVER || process.env.DB_HOST,
-  dialect: 'mssql',
-  port: parseInt(process.env.DB_PORT || '1433', 10),
-  logging: false,
-};
-
-const sequelize = isProd
-  ? new Sequelize(process.env.DB_NAME, null, null, {
-      ...base,
-      dialectOptions: {
-        authentication: {
-          // Default for App Service; change to 'azure-active-directory-msi-vm' if you run on VM/AKS node
-          type: 'azure-active-directory-msi-app-service',
-          options: {
-            // For user-assigned MI, pass the clientId; leave undefined for system-assigned
-            clientId: process.env.AZURE_CLIENT_ID_MI || undefined,
-          },
-        },
-        options: { encrypt: true },
-      },
-    })
-  : new Sequelize(
-      process.env.DB_NAME,
-      process.env.DB_CLIENT_ID,
-      process.env.DB_CLIENT_SECRET,
-      {
-        ...base,
+// Service Principal (Local or other fallback)
+    sequelize = new Sequelize(process.env.DB_NAME, process.env.DB_CLIENT_ID, process.env.DB_CLIENT_SECRET, {
+        host: process.env.DB_SERVER,
+        dialect: 'mssql',
+        port: parseInt(process.env.DB_PORT),
         dialectOptions: {
-          authentication: {
-            type: 'azure-active-directory-service-principal-secret',
-            options: {
-              clientId: process.env.DB_CLIENT_ID,
-              clientSecret: process.env.DB_CLIENT_SECRET,
-              tenantId: process.env.DB_TENANT_ID,
+            authentication: {
+                type: 'azure-active-directory-service-principal-secret',
+                options: {
+                    clientId: process.env.DB_CLIENT_ID,
+                    clientSecret: process.env.DB_CLIENT_SECRET,
+                    tenantId: process.env.DB_TENANT_ID
+                }
             },
-          },
-          options: { encrypt: true },
-        },
-      }
-    );
-
-(async function connectToDatabase() {
-  try {
-    await sequelize.authenticate();
-    console.log(`Connected to Azure SQL (${isProd ? 'MSI' : 'Service Principal'})`);
-    await sequelize.sync({ alter: false });
-    console.log('Database synced');
-  } catch (err) {
-    console.error('DB error:', err);
-    process.exit(1);
-  }
-})();
+            encrypt: true
+        }
+    });
+ 
+async function connectToDatabase() {
+    try {
+        await sequelize.authenticate();
+        console.log('Connected to Azure SQL Database successfully');
+ 
+        await sequelize.sync({ alter: false })
+            .then(() => console.log('Database synced'))
+            .catch((err) => {
+                console.error('Error syncing database:', err);
+                process.exit(1);
+            });
+ 
+ 
+    } catch (err) {
+        console.error('Error connecting to the database:', err);
+        throw err;
+    }
+}
+ connectToDatabase();
 
 
 // ---- Desktop HTTP telemetry (beginner path) ----
