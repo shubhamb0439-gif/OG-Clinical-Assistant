@@ -589,12 +589,13 @@ function buildSequelize() {
       // keep your original shape to avoid surprises in your env
       encrypt: true,
     },
-    logging: false, // flip to console.log for verbose SQL logs
+    // logging: false, // flip to console.log for verbose SQL logs
   };
 
   const useManagedIdentity = ['DEVELOPMENT', 'PRODUCTION', 'STAGING'].includes(AZURE_ENV);
 
   if (useManagedIdentity) {
+    console.log('useManagedIdentity',useManagedIdentity);
     // Managed Identity (User Assigned) — mirrors your first code block
     return new Sequelize(
       process.env.DB_NAME,
@@ -614,6 +615,7 @@ function buildSequelize() {
       }
     );
   }
+  
 
   // Service Principal (Local or other fallback) — mirrors your second block
   return new Sequelize(
