@@ -66,6 +66,20 @@ const BATTERY_PUSH_MS = 90_000;
 // ----------------- Helpers -----------------
 function nowIso() { return new Date().toISOString(); }
 
+// Use signaling's queued send if available; fallback to raw socket emit
+function emitSafe(event, data) {
+    try {
+        if (signaling && typeof signaling._send === 'function') {
+            signaling._send(event, data);
+        } else {
+            signaling?.socket?.emit(event, data);
+        }
+    } catch (e) {
+        console.warn('[SIGNAL][fallback emit] failed', event, e);
+    }
+}
+
+
 // ---- Persistence (localStorage) ----
 const STORAGE_KEY = 'xr-pwa-ui-state.v1';
 let persistedState = {
@@ -214,7 +228,8 @@ function createSignaling() {
             // start 12s telemetry
             telemetry = new TelemetryReporter({
                 xrId: ANDROID_XR_ID,
-                sendJson: (event, payload) => signaling.socket?.emit(event, payload),
+                sendJson: (event, payload) => emitSafe(event, payload),
+
                 periodMs: 12_000
             });
             telemetry.start();
@@ -438,7 +453,8 @@ elBtnStream.addEventListener('click', async () => {
             // ✅ persist last selected desktop even on stop (keeps continuity)
             persistedState.selectedDesktopId = to;
             saveState();
-            signaling?.sendControl?.({ to, command: 'stop_stream' });
+            emitSafe('control', { from: ANDROID_XR_ID, to, command: 'stop_stream', action: 'stop_stream' });
+
         } catch { }
 
         // Also turn off the local camera immediately
@@ -495,7 +511,8 @@ elBtnMute.addEventListener('click', async () => {
 
     // 2) Notify connected desktops (same as voice path)
     for (const targetId of connectedDesktops) {
-        signaling.socket?.emit('control', { from: ANDROID_XR_ID, to: targetId, command, action: command });
+        emitSafe('control', { from: ANDROID_XR_ID, to: targetId, command, action: command });
+
     }
 });
 
@@ -634,7 +651,8 @@ function finalizeRecordingNote() {
     // 🚀 Trigger SOAP on Dock/Scribe (action+command for compatibility)
     if (connectedDesktops.length > 0) {
         for (const targetId of connectedDesktops) {
-            signaling.socket?.emit('control', {
+            emitSafe('control', {
+
                 from: ANDROID_XR_ID,
                 to: targetId,
                 command: 'scribe_flush',
@@ -650,13 +668,14 @@ elBtnStartRec.addEventListener('click', onStartRecordingNote);
 elBtnStopRec.addEventListener('click', onStopRecordingNote);
 
 // Transcript sender (same payload as Android)
-function sendTranscript(text, isFinal) {
+async function sendTranscript(text, isFinal) {
     if (!isServerConnected) { msg('System', 'Not connected; transcript not sent.'); return; }
     if (connectedDesktops.length === 0) { msg('System', 'No desktops connected; transcript not sent.'); return; }
+    await signaling?.waitUntilConnected?.().catch(() => { });    // <-- INSERT THIS
 
     const ts = nowIso();
     for (const targetId of connectedDesktops) {
-        signaling.socket?.emit('message', {
+        emitSafe('message', {
             type: 'transcript',
             text,
             final: !!isFinal,
@@ -698,7 +717,7 @@ elBtnSend.addEventListener('click', () => {
     }
     const timestamp = nowIso();
     for (const targetId of connectedDesktops) {
-        signaling.socket?.emit('message', {
+        emitSafe('message', {
             type: 'message',
             text,
             sender: 'AndroidXR',
@@ -725,7 +744,7 @@ function emitBatteryOnce() {
     if (!isServerConnected) return;
     getBatterySnapshot().then(s => {
         if (!s) return;
-        signaling.socket?.emit('battery', {
+        emitSafe('battery', {
             xrId: ANDROID_XR_ID,
             batteryPct: s.batteryPct,
             charging: s.charging,
