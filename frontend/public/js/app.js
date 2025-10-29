@@ -166,30 +166,30 @@ const AUTO_KEY = 'XR_AUTOCONNECT';
 const medicationAvailabilityMap = new Map();
 
 async function checkMedicationAvailability(medications) {
-    if (!Array.isArray(medications) || medications.length === 0) {
-        return [];
+  if (!Array.isArray(medications) || medications.length === 0) {
+    return [];
+  }
+
+  try {
+    const response = await fetch(`${SERVER_URL}/api/medications/availability`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ names: medications }),
+    });
+
+    if (!response.ok) {
+      console.warn('[MED_CHECK] API returned error:', response.status);
+      return [];
     }
 
-    try {
-        const response = await fetch(`${SERVER_URL}/api/medications/availability`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ names: medications }),
-        });
-
-        if (!response.ok) {
-            console.warn('[MED_CHECK] API returned error:', response.status);
-            return [];
-        }
-
-        const data = await response.json();
-        return data.results || [];
-    } catch (err) {
-        console.error('[MED_CHECK] Error checking medications:', err);
-        return [];
-    }
+    const data = await response.json();
+    return data.results || [];
+  } catch (err) {
+    console.error('[MED_CHECK] Error checking medications:', err);
+    return [];
+  }
 }
 
 /* =========================
@@ -881,18 +881,8 @@ function createPeerConnection() {
         console.log('[WEBRTC] Added TURN server to ICE configuration');
     }
 
-    const pc = new RTCPeerConnection({
-        iceServers,
-        iceTransportPolicy: 'all',
-        sdpSemantics: 'unified-plan'
-    })
+    const pc = new RTCPeerConnection({ iceServers, iceTransportPolicy: 'all' });
     console.log('[WEBRTC] Peer connection created with ICE servers:', iceServers);
-
-    // Ensure we advertise we can receive both tracks
-    try {
-        pc.addTransceiver('video', { direction: 'recvonly' });
-        pc.addTransceiver('audio', { direction: 'recvonly' });
-    } catch { }
 
     // 🔽 INSERT THIS FLAG (scoped to this call)
     let qualityStarted = false;
@@ -911,8 +901,6 @@ function createPeerConnection() {
             console.log('[WEBRTC] Creating new remote stream');
             remoteStream = new MediaStream();
             videoElement.srcObject = remoteStream;
-            videoElement.setAttribute('playsinline', '');
-            
             videoElement.muted = true;
             setMirror(true); // mirror for front-cam view
         }
@@ -1109,38 +1097,11 @@ async function handleOffer(offer) {
         await peerConnection.setRemoteDescription(desc);
         lastRemoteOfferSdp = desc.sdp;
 
-        // Prefer H.264 when answering (helps iOS camera senders)
-        try {
-            const caps = RTCRtpReceiver.getCapabilities && RTCRtpReceiver.getCapabilities('video');
-            if (caps && Array.isArray(caps.codecs)) {
-                const h264 = caps.codecs.filter(c => (c.mimeType || '').toLowerCase() === 'video/h264');
-                if (h264.length && typeof peerConnection.getTransceivers === 'function') {
-                    for (const t of peerConnection.getTransceivers()) {
-                        if (t.receiver && t.receiver.track && t.receiver.track.kind === 'video' &&
-                            typeof t.setCodecPreferences === 'function') {
-                            t.setCodecPreferences(h264);
-                        }
-                    }
-                }
-            }
-        } catch { /* never block negotiation */ }
-
-        // Apply any buffered ICE candidates now that we have an RD
-        try {
-            if (Array.isArray(pendingIceCandidates) && pendingIceCandidates.length) {
-                for (const c of pendingIceCandidates) {
-                    try { await peerConnection.addIceCandidate(new RTCIceCandidate(c)); } catch { }
-                }
-                pendingIceCandidates = [];
-            }
-        } catch { }
-
         // 6) only answer when the state is exactly have-remote-offer
         if (peerConnection.signalingState !== 'have-remote-offer') {
             console.log('[WEBRTC] Not in have-remote-offer (state =', peerConnection.signalingState, ') — skipping answer.');
             return;
         }
-
 
         console.log('[WEBRTC] Creating answer');
         const answer = await peerConnection.createAnswer();
@@ -1171,29 +1132,18 @@ async function handleOffer(offer) {
 
 async function handleRemoteIceCandidate(candidate) {
     console.log('[WEBRTC] Handling remote ICE candidate:', candidate);
-    if (!candidate || !candidate.candidate) return;
-
-    if (!peerConnection) {
-        console.log('[WEBRTC] Buffering ICE candidate (no PC yet)');
+    if (peerConnection && candidate && candidate.candidate) {
+        try {
+            console.log('[WEBRTC] Adding ICE candidate to peer connection');
+            await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (err) {
+            console.error('[WEBRTC] Error adding ICE candidate:', err);
+        }
+    } else if (candidate) {
+        console.log('[WEBRTC] Buffering ICE candidate for later');
         pendingIceCandidates.push(candidate);
-        return;
-    }
-
-    // If SRD isn't applied yet, buffer and apply later (after SRD in handleOffer)
-    if (!peerConnection.remoteDescription) {
-        console.log('[WEBRTC] Buffering ICE candidate (no remoteDescription yet)');
-        pendingIceCandidates.push(candidate);
-        return;
-    }
-
-    try {
-        console.log('[WEBRTC] Adding ICE candidate to peer connection');
-        await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (err) {
-        console.error('[WEBRTC] Error adding ICE candidate:', err);
     }
 }
-
 
 function stopStream() {
     console.log('[STREAM] Stopping stream');
@@ -1330,7 +1280,7 @@ function updateDeviceList(devices) {
         console.log(`[PAIR] Peer (${peerId}) is not online yet — waiting`);
     }
 
-
+    
 
 }
 
