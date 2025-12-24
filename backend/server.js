@@ -110,56 +110,20 @@ app.use(cors());
 app.use(express.json());
 console.log('[MIDDLEWARE] CORS + JSON enabled');
 
-// Azure/AppService runs behind a reverse proxy
-app.set('trust proxy', 1);
-
-
 // Session middleware for platform admin
 const sessionSecret = process.env.SESSION_SECRET || 'change-me-in-production';
-
-// ✅ Persist sessions in production so logins survive app restarts / multi-instance routing
-let sessionStore = undefined;
-
-if (IS_PROD) {
-  // Requires: npm i connect-session-sequelize
-  const SequelizeStoreFactory = require('connect-session-sequelize');
-  const SequelizeStore = SequelizeStoreFactory(session.Store);
-
-  sessionStore = new SequelizeStore({
-    db: sequelize,
-    tableName: 'Platform_Sessions',
-    checkExpirationInterval: 15 * 60 * 1000, // 15 mins
-    expiration: 24 * 60 * 60 * 1000,         // 24 hrs
-  });
-
-  // create table if missing (non-destructive)
-  sessionStore.sync();
-}
-
 app.use(
   session({
-    name: 'connect.sid',
     secret: sessionSecret,
-    store: sessionStore, // ✅ NEW (only active in prod; undefined in local)
     resave: false,
     saveUninitialized: false,
-
-    // important behind Azure proxy / HTTPS
-    proxy: true,
-
     cookie: {
       httpOnly: true,
       sameSite: 'lax',
-
-      // ensure cookie behaves correctly on HTTPS behind proxy
-      secure: 'auto',
-
-
       maxAge: 24 * 60 * 60 * 1000,
     },
   })
 );
-
 console.log('[MIDDLEWARE] Session enabled');
 
 // ✅ Connect to Azure SQL via Sequelize on boot (non-fatal if it fails)
