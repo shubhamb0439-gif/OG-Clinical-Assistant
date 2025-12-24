@@ -110,16 +110,29 @@ app.use(cors());
 app.use(express.json());
 console.log('[MIDDLEWARE] CORS + JSON enabled');
 
+// Azure/AppService runs behind a reverse proxy
+app.set('trust proxy', 1);
+
+
 // Session middleware for platform admin
 const sessionSecret = process.env.SESSION_SECRET || 'change-me-in-production';
 app.use(
   session({
+    name: 'connect.sid',
     secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
+
+    // important behind Azure proxy / HTTPS
+    proxy: true,
+
     cookie: {
       httpOnly: true,
       sameSite: 'lax',
+
+      // ensure cookie behaves correctly on HTTPS behind proxy
+      secure: process.env.NODE_ENV === 'production',
+
       maxAge: 24 * 60 * 60 * 1000,
     },
   })
