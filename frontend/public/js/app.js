@@ -119,6 +119,10 @@ let peerConnection = null;
 let remoteStream = null;
 let clearedMessages = new Set();
 let pendingIceCandidates = [];
+// ✅ Option B race buffers: offer/ICE may arrive before room_joined
+let pendingLocalAnswer = null;     // RTCSessionDescriptionInit
+let pendingLocalIce = [];          // array of ICE candidates
+
 let isStreamActive = false;
 let reconnectTimeout = null;
 let heartbeatInterval = null;
@@ -711,8 +715,11 @@ function initSocket() {
 
     socket.on('room_joined', ({ roomId, members }) => {
         console.log('[PAIR] room_joined:', roomId, members);
+
+        // 1) Authoritative room routing
         currentRoom = roomId;
-        // Determine the other member in the pair room (the peer)
+
+        // 2) Determine peer safely
         try {
             const me = normalizeId(XR_ID);
             const other = Array.isArray(members)
@@ -720,13 +727,75 @@ function initSocket() {
                 : null;
             pairedPeerId = other || null;
             console.log('[PAIR] pairedPeerId =', pairedPeerId);
-        } catch { }
+        } catch (e) {
+            console.warn('[PAIR] failed to derive pairedPeerId:', e);
+            pairedPeerId = null;
+        }
 
-        addSystemMessage(`🎯 VR Room created: ${roomId}. Members: ${members.join(', ')}`);
+        // 3) Safe message (members may be undefined during races)
+        const memList = Array.isArray(members) ? members.join(', ') : '';
+        addSystemMessage(`🎯 VR Room created: ${roomId}.${memList ? ` Members: ${memList}` : ''}`);
 
-        // ✅ Force device list to re-render using pair-only filter
+        // 4) Re-render device list (unchanged)
         if (lastDeviceList) updateDeviceList(lastDeviceList);
+
+        // ✅ Flush any WebRTC payloads that were created before room_joined existed
+        if (pendingLocalAnswer && socket?.connected) {
+            try {
+                socket.emit('signal', {
+                    type: 'answer',
+                    from: XR_ID,
+                    roomId: currentRoom,
+                    data: pendingLocalAnswer,
+                });
+                console.log('[WEBRTC] Flushed buffered answer after room_joined');
+            } catch (e) {
+                console.warn('[WEBRTC] Failed to flush buffered answer:', e);
+            }
+            pendingLocalAnswer = null;
+        }
+
+        if (Array.isArray(pendingLocalIce) && pendingLocalIce.length && socket?.connected) {
+            const queued = pendingLocalIce.slice();
+            pendingLocalIce.length = 0;
+            for (const c of queued) {
+                try {
+                    socket.emit('signal', {
+                        type: 'ice-candidate',
+                        from: XR_ID,
+                        roomId: currentRoom,
+                        data: c,
+                    });
+                } catch (e) {
+                    console.warn('[WEBRTC] Failed to flush buffered ICE:', e);
+                }
+            }
+            console.log('[WEBRTC] Flushed buffered ICE after room_joined:', queued.length);
+        }
+
+
+        // 5) ✅ CRITICAL: release any pending "start stream" or offer request that was blocked
+        // If your app already has a flag name, tell me what it is and I’ll align to it.
+        const startWasDeferred = (window.__startWasClickedBeforePair === true);
+
+        if (startWasDeferred) {
+
+            console.log('[PAIR] releasing deferred start after room_joined');
+            window.__startWasClickedBeforePair = false;
+            try { startStream(); } catch (e) { console.warn('[PAIR] deferred startStream failed:', e); }
+        }
+
+        // 6) ✅ If you use request_offer pattern, it MUST happen after currentRoom exists
+        // (If your device initiates offers automatically, you can remove this.)
+        // Only request an offer if we actually need to start streaming
+        if (startWasDeferred) {
+            try {
+                socket?.emit('signal', { type: 'request_offer', from: XR_ID, roomId: currentRoom });
+            } catch { }
+        }
+
     });
+
 
     socket.on('peer_left', ({ xrId, roomId }) => {
         console.log('[PAIR] peer_left', xrId, roomId);
@@ -1075,14 +1144,19 @@ function createPeerConnection() {
         if (event.candidate) {
             console.log('[WEBRTC] Generated ICE candidate:', event.candidate);
 
+            // Option B: Do not emit ICE until we have a server-issued pair room.
+            // Otherwise ICE gets dropped server-side and the video stays black after reconnect.
+            if (!currentRoom) {
+                console.warn('[WEBRTC] ICE generated before room_joined; queueing until paired');
+                (pendingLocalIce ||= []).push(event.candidate);
+                return;
+            }
+
+
             socket?.emit('signal', {
                 type: 'ice-candidate',
                 from: XR_ID,
-
-                // ✅ enforce pair isolation
-                ...(pairedPeerId ? { to: pairedPeerId } : {}),
-                ...(currentRoom ? { roomId: currentRoom } : {}),
-
+                roomId: currentRoom,
                 data: event.candidate,
             });
 
@@ -1093,11 +1167,14 @@ function createPeerConnection() {
 
 
 
+
     pc.oniceconnectionstatechange = () => {
         console.log('[WEBRTC] ICE connection state changed:', pc.iceConnectionState);
         if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected') {
             console.log('[WEBRTC] ICE connection failed or disconnected - stopping stream');
             stopStream();
+
+
         }
     };
 
@@ -1254,16 +1331,21 @@ async function handleOffer(offer) {
         console.log('[WEBRTC] Setting local description');
         await peerConnection.setLocalDescription(answer);
 
+        // Option B: Don't emit answer until paired room exists.
+        if (!currentRoom) {
+            console.warn('[WEBRTC] Have answer ready but no currentRoom yet; buffering until room_joined');
+            pendingLocalAnswer = peerConnection.localDescription;
+            return;
+        }
+
+
         const payload = {
             type: 'answer',
             from: XR_ID,
-
-            // ✅ enforce strict 1-to-1 isolation (server can route by room, and/or verify target)
-            ...(pairedPeerId ? { to: pairedPeerId } : {}),
-            ...(currentRoom ? { roomId: currentRoom } : {}),
-
+            roomId: currentRoom,
             data: peerConnection.localDescription,
         };
+
 
         console.log('[WEBRTC] Emitting signal (answer):', payload);
         socket?.emit('signal', payload);
@@ -1283,7 +1365,8 @@ async function handleOffer(offer) {
 
 async function handleRemoteIceCandidate(candidate) {
     console.log('[WEBRTC] Handling remote ICE candidate:', candidate);
-    if (peerConnection && candidate && candidate.candidate) {
+    if (peerConnection && peerConnection.remoteDescription && candidate && candidate.candidate) {
+
         try {
             console.log('[WEBRTC] Adding ICE candidate to peer connection');
             await peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
@@ -1345,6 +1428,9 @@ function stopStream() {
     }
 
     pendingIceCandidates = [];
+    pendingLocalAnswer = null;
+    pendingLocalIce = [];
+
 
     // ✅ Stop quality monitor
     if (window.__stopQuality) {
@@ -1651,8 +1737,10 @@ function handleControlCommand(data) {
             if (!currentRoom) {
                 addSystemMessage('⚠️ Not paired yet. Wait for room_joined before starting stream.');
                 console.warn('[CONTROL] start_stream: not paired yet (no currentRoom)');
+                window.__startWasClickedBeforePair = true;   // ✅ defer start until room_joined
                 break;
             }
+
             console.log('[CONTROL] Requesting SDP offer from peer (pair-room)');
             socket?.emit('control', { command: 'request_offer' });
 
