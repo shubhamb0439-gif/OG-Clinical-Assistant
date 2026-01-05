@@ -1,4 +1,4 @@
-// public/js/device.js
+//-------------------------------------- public/js/device.js------------------------------------------------------------
 // Browser/PWA port of: WebRtcStreamer.kt (+AudioStreamer.kt folded into getUserMedia)
 // and PeerConnectionObserver logs (inline). Mirrors Android behavior.
 // CITED FROM ANDROID SOURCE: WebRtcStreamer, AudioStreamer, PeerConnectionObserver.  (See upload) 

@@ -1,4 +1,4 @@
-// =====================================================ui.js===========================================================
+// =====================================================ui.js====////=======================================================
 
 // UI wiring converted from EmulatorUI.kt + MainActivity.kt
 // Keeps identical semantics, event names, and control flow.
@@ -367,6 +367,7 @@ function preferDesktop(listPairs) {
 }
 
 
+
 // ----------------- Signaling wiring (parity) -----------------
 function createSignaling() {
     signaling = new SignalingClient({
@@ -385,7 +386,6 @@ function createSignaling() {
             telemetry = new TelemetryReporter({
                 xrId: ANDROID_XR_ID,
                 sendJson: (event, payload) => emitSafe(event, payload),
-
                 periodMs: 12_000
             });
             telemetry.start();
@@ -397,8 +397,7 @@ function createSignaling() {
         onDisconnected: () => {
             isServerConnected = false;
 
-            // ⬇️ add these two lines
-            userWantsConnected = false;      // prevent auto-reconnect after a manual disconnect
+            userWantsConnected = false; // prevent auto-reconnect after a manual disconnect
 
             setStatus(false);
             msg('System', 'Disconnected from server');
@@ -409,22 +408,38 @@ function createSignaling() {
             if (streamActive) {
                 streamActive = false;
                 streamer?.stopStreaming().catch(() => { });
-
                 msg('System', 'Stream stopped.');
             }
 
             // Ensure camera is off even if we weren't "streaming"
             try { ensureStreamer().stopCamera(); } catch { }
+
             // Only disable reconnection if this was a *manual* disconnect
             if (signaling?._manualClose) {
                 try { signaling.setReconnectionEnabled(false); } catch { }
             }
 
-            // ✅ AUTO-RELOAD block — add right here
+            // ✅ AUTO-RELOAD block
             console.log('[AUTO-RELOAD] onDisconnected hook firing', { manualClose: signaling?._manualClose });
             try { persistNow(); } catch { }
-            if (!streamActive) { // optional guard—skip reload during active stream cuts if you prefer
+            if (!streamActive) {
                 scheduleAutoReload(signaling?._manualClose ? 'user' : 'network');
+            }
+        },
+
+        // ✅ Option B: dedicated room_joined handler (from signaling.js)
+        onRoomJoined: (payload) => {
+            const members = Array.isArray(payload?.members) ? payload.members : [];
+            const me = normalizeXrId(ANDROID_XR_ID);
+            const other = members.map(normalizeXrId).find(x => x && x !== me) || null;
+
+            pairedDesktopId = other;
+            signaling.currentDesktopId = other || null;
+
+            if (other) {
+                msg('System', `🎯 Paired with Desktop [${other}] in room ${payload?.roomId || ''}`);
+            } else {
+                msg('System', `🎯 Room joined: ${payload?.roomId || ''}`);
             }
         },
 
@@ -456,16 +471,13 @@ function createSignaling() {
                     return;
                 }
 
-
                 streamer.sendOfferTo(to).catch(console.error);
-                return;                                    // <— KEEP this return
+                return; // <— KEEP this return
             }
 
-            // ⬇️ INSERT THESE TWO LINES *RIGHT HERE*, before the closing brace of onControl
             if (cmd === 'mute') { applyMute(true); return; }
             if (cmd === 'unmute') { applyMute(false); return; }
         },
-
 
         onDeviceListUpdated: (listPairs) => {
             preferDesktop(listPairs);
@@ -481,43 +493,21 @@ function createSignaling() {
                 msg('System', `System [${ANDROID_XR_ID}] sees Desktop [${shown}] online.`);
             }
 
-
             if (!hadDesktops && streamActive) {
                 streamActive = false;
                 streamer?.stopStreaming().catch(() => { });
                 setStatus(isServerConnected);
                 msg('System', 'All desktops disconnected. Stopped streaming.');
-
-
             }
         },
 
-
-
         onServerMessage: (event, payload) => {
-
-            // ✅ Option B: server tells us the pair room + members
-            if (event === 'room_joined') {
-                const members = Array.isArray(payload?.members) ? payload.members : [];
-                const me = normalizeXrId(ANDROID_XR_ID);
-                const other = members.map(normalizeXrId).find(x => x && x !== me) || null;
-
-                pairedDesktopId = other;
-                signaling.currentDesktopId = other || null;
-
-                if (other) {
-                    msg('System', `🎯 Paired with Desktop [${other}] in room ${payload?.roomId || ''}`);
-                } else {
-                    msg('System', `🎯 Room joined: ${payload?.roomId || ''}`);
-                }
-                return;
-            }
+            // NOTE: room_joined is handled by onRoomJoined now (avoid double handling)
 
             if (event === 'peer_left') {
                 const id = (payload?.xrId || '').toUpperCase();
                 const expected = (pairedDesktopId || DEFAULT_DESKTOP_ID).toUpperCase();
                 if (id === expected) {
-
                     msg('System', `Desktop [${expected}] left the room (${payload?.roomId || ''}).`);
                     connectedDesktops = connectedDesktops.filter(x => x.toUpperCase() !== expected);
                     if (streamActive) {
@@ -562,6 +552,7 @@ function createSignaling() {
 
     signaling.connect();
 }
+
 
 
 function ensureStreamer() {
@@ -927,6 +918,7 @@ async function sendTranscript(text, isFinal) {
 }
 
 // ----------------- Control & Chat sending -----------------
+
 function sendControlCommand(command) {
     // 🔒 READ-only guard for any remote control / streaming
     if (!hasDeviceWritePermission()) {
@@ -934,12 +926,19 @@ function sendControlCommand(command) {
         return;
     }
 
-    if (connectedDesktops.length === 0) {
-        msg('System', 'No desktops connected to send command'); return;
+    // ✅ Option B strict: prefer paired desktop only, else fallback to current list
+    const targets = pairedDesktopId ? [pairedDesktopId] : connectedDesktops.slice();
+
+    if (targets.length === 0) {
+        msg('System', 'No desktops connected to send command');
+        return;
     }
-    for (const targetId of connectedDesktops) {
-        signaling.socket?.emit('control', { from: ANDROID_XR_ID, to: targetId, command, action: command });
+
+    for (const targetId of targets) {
+        // ✅ Use emitSafe so signaling queue + roomId logic is preserved
+        emitSafe('control', { from: ANDROID_XR_ID, to: targetId, command, action: command });
     }
+
     // local handling mirrors Android’s immediate UI update:
     if (command === 'start_stream') elBtnStream.click();
     else if (command === 'stop_stream') elBtnStream.click();
@@ -948,6 +947,7 @@ function sendControlCommand(command) {
     else if (command === 'hide_video') { if (videoVisible) elBtnVideo.click(); }
     else if (command === 'show_video') { if (!videoVisible) elBtnVideo.click(); }
 }
+
 
 elBtnSend.addEventListener('click', () => {
     if (!hasDeviceWritePermission()) {

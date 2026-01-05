@@ -35,9 +35,10 @@ export class SignalingClient {
     this._outbox = [];            // [{event, data}]
     this._OUTBOX_MAX = 200;       // cap to avoid unbounded growth
 
-
     // Presence / desktop preference (parity with Android)
     this.currentDesktopId = null;
+    this.roomId = null;  // ✅ server-issued pair room
+
     this._wasDesktopOnline = false;
     this.DESKTOP_ID = (typeof window !== 'undefined' && window.XR_OPERATOR_ID)
       ? String(window.XR_OPERATOR_ID).toUpperCase()
@@ -57,6 +58,7 @@ export class SignalingClient {
     this._onDisconnect = this._onDisconnect.bind(this);
     this._onConnectError = this._onConnectError.bind(this); // ← FIX: make sure method exists below
     this._onSignal = this._onSignal.bind(this);
+    this._onRoomJoined = this._onRoomJoined.bind(this);
     this._onDeviceList = this._onDeviceList.bind(this);
     this._onPeerLeft = this._onPeerLeft.bind(this);
     this._onMessage = this._onMessage.bind(this);
@@ -65,12 +67,13 @@ export class SignalingClient {
   }
 
   /** Establish the Socket.IO connection. Mirrors Android options. */
+
   connect() {
-    if (this.socket) return; // already connecting/connected
+    if (this.socket) return;
 
     const opts = {
       path: '/socket.io',
-      transports: ['websocket'],        // avoid long-polling (Azure/app service friendly)
+      transports: ['websocket'],
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
@@ -79,7 +82,7 @@ export class SignalingClient {
       forceNew: true
     };
 
-    this._manualClose = false;       // we are connecting intentionally
+    this._manualClose = false;
     this.socket = this.io(opts);
 
     // Core lifecycle
@@ -92,13 +95,17 @@ export class SignalingClient {
     this.socket.on('device_list', this._onDeviceList);
     this.socket.on('peer_left', this._onPeerLeft);
 
+    // ✅ Pair-room event (ONLY ONCE)
+    this.socket.on('room_joined', this._onRoomJoined);
+
     // Optional passthroughs
     this.socket.on('message', this._onMessage);
     this.socket.on('message_history', this._onMessageHistory);
 
-    // NEW: forward control events to UI (APK parity)
+    // Control passthrough
     this.socket.on('control', this._onControl);
   }
+
 
   /** Disable/enable automatic reconnection like Android setReconnectionEnabled(). */
   setReconnectionEnabled(enable) {
@@ -131,6 +138,10 @@ export class SignalingClient {
     this.socket.off('signal', this._onSignal);
     this.socket.off('device_list', this._onDeviceList);
     this.socket.off('peer_left', this._onPeerLeft);
+
+    // ✅ NEW: pair-room event
+    this.socket.off('room_joined', this._onRoomJoined);
+
     this.socket.off('message', this._onMessage);
     this.socket.off('message_history', this._onMessageHistory);
     this.socket.off('control', this._onControl);
@@ -242,6 +253,7 @@ export class SignalingClient {
 
   _onDisconnect(reason) {
     this.isConnected = false;
+    this.roomId = null;
     this.listener?.onDisconnected?.(reason || (this._manualClose ? 'user' : 'transport'));
   }
 
@@ -259,6 +271,25 @@ export class SignalingClient {
     const data = obj?.data ?? {};
     this.listener?.onSignal?.(type, from, to, data);
   }
+
+  _onRoomJoined(evt) {
+    // Expected from server: { roomId, members? }
+    const rid = evt?.roomId || null;
+    this.roomId = rid;
+    // Now that we have roomId, flush any queued signals that were waiting for pairing.
+    try {
+      for (const item of this._outbox) this.socket?.emit(item.event, item.data);
+    } finally {
+      this._outbox.length = 0;
+    }
+
+
+    console.log('[SIGNAL] room_joined → roomId:', rid);
+
+    // Optional: forward to UI if needed
+    this.listener?.onRoomJoined?.(evt);
+  }
+
 
   _onDeviceList(arr) {
     if (!Array.isArray(arr)) return;
@@ -312,7 +343,13 @@ export class SignalingClient {
   }
 
   _emitSignal(type, from, to, data) {
-    const payload = { type, from, to, data };
+    const payload = {
+      type,
+      from,
+      to,
+      ...(this.roomId ? { roomId: this.roomId } : {}),
+      data
+    };
     this._send('signal', payload);
   }
 
@@ -323,6 +360,20 @@ export class SignalingClient {
 
   _send(event, data) {
     const s = this.socket;
+
+    // Option B: never emit WebRTC signaling until we have server-issued roomId.
+    // Otherwise offers/ICE get dropped server-side (no roomId yet) and streaming won't start.
+    if (event === 'signal') {
+      const t = data?.type;
+      const webrtcTypes = new Set(['offer', 'answer', 'ice-candidate', 'request_offer']);
+      if (webrtcTypes.has(t) && !this.roomId) {
+        if (this._outbox.length < this._OUTBOX_MAX) this._outbox.push({ event, data });
+        else this._outbox.shift(), this._outbox.push({ event, data });
+        console.warn(`Queued WebRTC signal [${t}] until room_joined.`);
+        return;
+      }
+    }
+
     if (s && this.isConnected) {
       s.emit(event, data);
     } else {
