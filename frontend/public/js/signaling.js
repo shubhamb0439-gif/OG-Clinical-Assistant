@@ -34,6 +34,7 @@ export class SignalingClient {
     // Queue emits while offline; flush on connect (prevents lost offer/ICE during blips)
     this._outbox = [];            // [{event, data}]
     this._OUTBOX_MAX = 200;       // cap to avoid unbounded growth
+    this._gen = 0; // increments each connect/disconnect cycle (prevents stale outbox flush)
 
     // Presence / desktop preference (parity with Android)
     this.currentDesktopId = null;
@@ -235,21 +236,23 @@ export class SignalingClient {
 
   _onConnect() {
     this.isConnected = true;
+    this._gen++;
+    // Clear any stale queued emits from previous sessions.
+    // Fresh session must start with clean outbox.
+    this._outbox.length = 0;
+
 
     // parity with Android: join + identify + request_device_list
     this.socket.emit('join', this.xrId);
     this.socket.emit('identify', { deviceName: this.deviceName, xrId: this.xrId });
     this.socket.emit('request_device_list');
-    // Flush any queued emits in order
-    try {
-      for (const item of this._outbox) this.socket.emit(item.event, item.data);
-    } finally {
-      this._outbox.length = 0;
-    }
 
+    // NOTE: do NOT flush outbox here.
+    // We flush only after room_joined so pairing-sensitive commands can't fire too early.
 
     this.listener?.onConnected?.();
   }
+
 
   _onDisconnect(reason) {
     this.isConnected = false;
@@ -277,11 +280,18 @@ export class SignalingClient {
     const rid = evt?.roomId || null;
     this.roomId = rid;
     // Now that we have roomId, flush any queued signals that were waiting for pairing.
+    // Now that we have roomId, flush only items queued for THIS connect generation.
     try {
-      for (const item of this._outbox) this.socket?.emit(item.event, item.data);
-    } finally {
-      this._outbox.length = 0;
+      const remaining = [];
+      for (const item of this._outbox) {
+        if (item?.gen === this._gen) this.socket?.emit(item.event, item.data);
+        else remaining.push(item); // defensive: keep anything stale (should be none)
+      }
+      this._outbox = remaining;
+    } catch {
+      // ignore
     }
+
 
 
     console.log('[SIGNAL] room_joined → roomId:', rid);
@@ -367,9 +377,25 @@ export class SignalingClient {
       const t = data?.type;
       const webrtcTypes = new Set(['offer', 'answer', 'ice-candidate', 'request_offer']);
       if (webrtcTypes.has(t) && !this.roomId) {
-        if (this._outbox.length < this._OUTBOX_MAX) this._outbox.push({ event, data });
-        else this._outbox.shift(), this._outbox.push({ event, data });
+        const item = { event, data, gen: this._gen };
+        if (this._outbox.length < this._OUTBOX_MAX) this._outbox.push(item);
+        else this._outbox.shift(), this._outbox.push(item);
         console.warn(`Queued WebRTC signal [${t}] until room_joined.`);
+        return;
+      }
+    }
+
+    // Option B: also gate pairing-sensitive CONTROL commands until room_joined.
+    // Otherwise request_offer/start_stream can fire before pairing and get ignored,
+    // causing "Connecting..." until a refresh.
+    if (event === 'control') {
+      const cmd = String(data?.command || data?.action || '').toLowerCase();
+      const needsRoom = new Set(['request_offer', 'start_stream', 'stop_stream', 'scribe_flush']);
+      if (needsRoom.has(cmd) && !this.roomId) {
+        const item = { event, data, gen: this._gen };
+        if (this._outbox.length < this._OUTBOX_MAX) this._outbox.push(item);
+        else this._outbox.shift(), this._outbox.push(item);
+        console.warn(`Queued CONTROL [${cmd}] until room_joined.`);
         return;
       }
     }
@@ -378,12 +404,13 @@ export class SignalingClient {
       s.emit(event, data);
     } else {
       // Queue and warn once for visibility
-      if (this._outbox.length < this._OUTBOX_MAX) this._outbox.push({ event, data });
-      else this._outbox.shift(), this._outbox.push({ event, data });
+      const item = { event, data, gen: this._gen };
+      if (this._outbox.length < this._OUTBOX_MAX) this._outbox.push(item);
+      else this._outbox.shift(), this._outbox.push(item);
       console.warn(`Socket not connected. Queued emit [${event}].`);
     }
-
   }
+
 }
 
 export default SignalingClient;

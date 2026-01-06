@@ -719,6 +719,9 @@ function initSocket() {
         // 1) Authoritative room routing
         currentRoom = roomId;
 
+        // ✅ FIX: pairing complete = connected
+        setStatus('Connected');
+
         // 2) Determine peer safely
         try {
             const me = normalizeId(XR_ID);

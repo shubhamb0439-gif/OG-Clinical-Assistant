@@ -167,19 +167,23 @@ const elChkUrgent = document.getElementById('chkUrgent');
 const elBtnSend = document.getElementById('btnSend');
 
 
-// Initialise Device XR ID input from localStorage or default
+// Initialise Device XR ID input (CLEAN BOOT; no localStorage XR ID)
 if (elDeviceXrIdInput) {
-    try {
-        const stored = localStorage.getItem('xr-device-id');
-        const initialId = normalizeXrId(stored || ANDROID_XR_ID);
-        // Show only the numeric part to the user (like Dock’s "1234")
-        elDeviceXrIdInput.value = initialId.replace(/^XR-/, '');
-        ANDROID_XR_ID = initialId;
-        window.XR_DEVICE_ID = ANDROID_XR_ID;
-    } catch {
-        elDeviceXrIdInput.value = (ANDROID_XR_ID || '').replace(/^XR-/, '');
-    }
+    // Always wipe the legacy leaking key
+    clearLegacyLocalXrId();
+
+    // ✅ Hard rule: refresh/new tab must start clean (no XR ID carry-over)
+    // Use literal key here because XR_ID_SESSION_KEY const is declared later.
+    try { sessionStorage.removeItem('xr-device-id'); } catch { }
+
+    ANDROID_XR_ID = '';
+    window.XR_DEVICE_ID = '';
+
+    // Show blank on boot
+    elDeviceXrIdInput.value = '';
 }
+
+
 
 // ----------------- State -----------------
 let signaling = null;
@@ -224,9 +228,40 @@ function emitSafe(event, data) {
     }
 }
 
+// ---- XR ID storage (TAB-LOCAL) ----
+const XR_ID_SESSION_KEY = 'xr-device-id';
+
+function getSessionXrId() {
+    return sessionStorage.getItem(XR_ID_SESSION_KEY) || '';
+}
+function setSessionXrId(xrId) {
+    sessionStorage.setItem(XR_ID_SESSION_KEY, xrId);
+}
+function clearSessionXrId() {
+    sessionStorage.removeItem(XR_ID_SESSION_KEY);
+}
+
+// legacy cleanup (old buggy key that leaks across tabs)
+function clearLegacyLocalXrId() {
+    try { localStorage.removeItem('xr-device-id'); } catch { }
+}
+
+// ---- Per-XR state key (history/UI) ----
+function stateKeyForXr(xrId) {
+    return `xr_state:${xrId}`;
+}
+
+
 
 // ---- Persistence (localStorage) ----
-const STORAGE_KEY = 'xr-pwa-ui-state.v1';
+// XR identity must NOT be stored in localStorage.
+// localStorage is ONLY for per-XR persisted UI state (messages, toggles, etc.)
+
+function storageKeyForCurrentXr() {
+    const xrId = normalizeXrId(ANDROID_XR_ID || '');
+    return xrId ? stateKeyForXr(xrId) : null; // stateKeyForXr(xrId) => `xr_state:${xrId}`
+}
+
 let persistedState = {
     messages: [],             // { sender, text, timestamp, xrId, urgent }
     connectedDesktops: [],    // e.g. ['XR-1238']
@@ -234,23 +269,55 @@ let persistedState = {
     micMuted: true,
     userWantsConnected: false
 };
+
 let _rehydrating = false, _saveTimer = null;
+
 function saveState(throttleMs = 300) {
     if (_rehydrating) return;
+
+    const key = storageKeyForCurrentXr();
+    if (!key) return; // no XR connected => do not persist
+
     clearTimeout(_saveTimer);
     _saveTimer = setTimeout(() => {
-        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(persistedState)); } catch { }
+        try { localStorage.setItem(key, JSON.stringify(persistedState)); } catch { }
     }, throttleMs);
 }
-function persistNow() { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(persistedState)); } catch { } }
-function loadState() {
-    try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if (!raw) return;
-        const parsed = JSON.parse(raw);
-        for (const k of Object.keys(persistedState)) if (k in parsed) persistedState[k] = parsed[k];
-    } catch { }
+
+function persistNow() {
+    const key = storageKeyForCurrentXr();
+    if (!key) return;
+    try { localStorage.setItem(key, JSON.stringify(persistedState)); } catch { }
 }
+
+// IMPORTANT: load only after explicit Connect (after ANDROID_XR_ID is set)
+function loadStateForXr(xrId) {
+    try {
+        const key = xrId ? stateKeyForXr(normalizeXrId(xrId)) : null;
+        if (!key) return false;
+
+        const raw = localStorage.getItem(key);
+        if (!raw) return false;
+
+        const parsed = JSON.parse(raw);
+        for (const k of Object.keys(persistedState)) {
+            if (k in parsed) persistedState[k] = parsed[k];
+        }
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// Backward-compatible wrapper:
+// If any existing code still calls loadState(), it will NOT load anything unless
+// an XR is already explicitly connected in this tab.
+function loadState() {
+    const xrId = normalizeXrId(ANDROID_XR_ID || '');
+    if (!xrId) return false;
+    return loadStateForXr(xrId);
+}
+
 
 // ---- Auto-reload on disconnect (safe + interval-guarded) ----
 const AUTO_RELOAD_ON_DISCONNECT = true;
@@ -412,7 +479,7 @@ function createSignaling() {
             }
 
             // Ensure camera is off even if we weren't "streaming"
-            try { ensureStreamer().stopCamera(); } catch { }
+            try { streamer?.stopCamera(); } catch { }
 
             // Only disable reconnection if this was a *manual* disconnect
             if (signaling?._manualClose) {
@@ -425,6 +492,9 @@ function createSignaling() {
             if (!streamActive) {
                 scheduleAutoReload(signaling?._manualClose ? 'user' : 'network');
             }
+
+            // ✅ finalize hard reset after disconnect handler finishes
+            signaling = null;
         },
 
         // ✅ Option B: dedicated room_joined handler (from signaling.js)
@@ -556,13 +626,30 @@ function createSignaling() {
 
 
 function ensureStreamer() {
-    if (streamer) return streamer;
-    streamer = new WebRtcStreamer({ signaling, androidXrId: ANDROID_XR_ID });
-    streamer.attachVideo(elPreview);
+    // If streamer exists but XR ID changed (or was blank at creation), recreate safely
+    const wantXrId = normalizeXrId(ANDROID_XR_ID || '');
+    const hasXrId = !!wantXrId;
+
+    if (streamer) {
+        // Best-effort: if streamer has an androidXrId field and it differs, rebuild
+        try {
+            const current = normalizeXrId(streamer.androidXrId || streamer._androidXrId || '');
+            if (hasXrId && current && current !== wantXrId) {
+                try { streamer.stopStreaming?.(); } catch { }
+                try { streamer.stopCamera?.(); } catch { }
+                streamer = null;
+            }
+        } catch { }
+    }
+
+    if (!streamer) {
+        streamer = new WebRtcStreamer({ signaling, androidXrId: wantXrId });
+        streamer.attachVideo(elPreview);
+    }
     return streamer;
 }
 
-// ----------------- Controls -----------------
+
 // ----------------- Controls -----------------
 // Connect / Disconnect
 elBtnConnect.addEventListener('click', async () => {
@@ -599,6 +686,32 @@ elBtnConnect.addEventListener('click', async () => {
         isServerConnected = false;
 
         setStatus(false);
+        // ✅ Identity reset on Disconnect (critical for Option B)
+        clearSessionXrId();
+        clearLegacyLocalXrId();
+
+        ANDROID_XR_ID = '';
+        window.XR_DEVICE_ID = '';
+        pairedDesktopId = null;
+
+        // Clear the input back to blank
+        if (elDeviceXrIdInput) elDeviceXrIdInput.value = '';
+
+        // Clear local UI state (do NOT delete per-XR localStorage history)
+        connectedDesktops = [];
+        hadDesktops = false;
+
+        // ✅ hard reset WebRTC + signaling objects so reconnect always streams cleanly
+        try { streamer?.stopCamera?.(); } catch { }
+        streamer = null;
+
+
+        // Cancel any pending offer retry from a previous stream attempt
+        if (window.__offerRetryTimer) {
+            clearTimeout(window.__offerRetryTimer);
+            window.__offerRetryTimer = null;
+        }
+
         return;
     }
 
@@ -617,9 +730,43 @@ elBtnConnect.addEventListener('click', async () => {
 
         ANDROID_XR_ID = normalized;          // will be XR-1234
         window.XR_DEVICE_ID = ANDROID_XR_ID;
+
+        // Load per-XR persisted state ONLY after explicit Connect
+        // Reset in-memory state first
+        persistedState = {
+            messages: [],
+            connectedDesktops: [],
+            selectedDesktopId: null,
+            micMuted: true,
+            userWantsConnected: false
+        };
+
+        _rehydrating = true;
         try {
-            localStorage.setItem('xr-device-id', ANDROID_XR_ID);
-        } catch { /* ignore */ }
+            loadStateForXr(ANDROID_XR_ID);
+
+            // restore messages for this XR only
+            if (Array.isArray(persistedState.messages)) {
+                elMsgList.innerHTML = '';
+                for (const m of persistedState.messages) {
+                    appendMessage(elMsgList, new Message({
+                        sender: m.sender, text: m.text, timestamp: m.timestamp, xrId: m.xrId, urgent: !!m.urgent
+                    }));
+                }
+                elMsgList.scrollTop = elMsgList.scrollHeight;
+            }
+
+            micMuted = !!persistedState.micMuted;
+        } finally {
+            _rehydrating = false;
+        }
+
+        // Store XR ID TAB-LOCALLY only (prevents leaking across tabs)
+        setSessionXrId(ANDROID_XR_ID);
+
+        // Also ensure legacy localStorage key is not present
+        clearLegacyLocalXrId();
+
 
         msg('System', `Using XR Device ID [${ANDROID_XR_ID}].`);
     }
@@ -663,7 +810,7 @@ elBtnStream.addEventListener('click', async () => {
         } catch { }
 
         // Also turn off the local camera immediately
-        try { ensureStreamer().stopCamera(); } catch { }
+        try { streamer?.stopCamera?.(); } catch { }
 
         // Cancel any offer retry timer you may have started
         if (window.__offerRetryTimer) {
@@ -1011,38 +1158,33 @@ function stopBatteryTicker() {
 }
 
 // ----------------- Boot -----------------
-loadState();
+// Do NOT load XR state on boot. State loads only after explicit Connect with an XR ID.
 _rehydrating = true;
 try {
-    // restore messages
-    if (Array.isArray(persistedState.messages)) {
-        for (const m of persistedState.messages) {
-            // render without re-triggering saves
-            appendMessage(elMsgList, new Message({
-                sender: m.sender, text: m.text, timestamp: m.timestamp, xrId: m.xrId, urgent: !!m.urgent
-            }));
-        }
-        elMsgList.scrollTop = elMsgList.scrollHeight;
-    }
-    // restore desktops + selection
-    if (Array.isArray(persistedState.connectedDesktops)) {
-        connectedDesktops = persistedState.connectedDesktops.slice();
-    }
-    if (persistedState.selectedDesktopId) {
-        if (signaling) signaling.currentDesktopId = persistedState.selectedDesktopId;
-    }
-    // restore toggles
-    micMuted = !!persistedState.micMuted;
-    userWantsConnected = !!persistedState.userWantsConnected;
+    // Ensure in-memory state starts clean for a brand-new tab / refresh
+    persistedState.messages = [];
+    persistedState.connectedDesktops = [];
+    persistedState.selectedDesktopId = null;
+    persistedState.micMuted = true;
+    persistedState.userWantsConnected = false;
+
+    connectedDesktops = [];
+    hadDesktops = false;
+    pairedDesktopId = null;
+
+    micMuted = true;
+    userWantsConnected = false;
+
+    // Clear any rendered messages in the UI
+    try { elMsgList.innerHTML = ''; } catch { }
 } finally {
     _rehydrating = false;
 }
 
 // reflect UI state
 setStatus(false);
-if (persistedState.messages.length === 0) {
-    msg('System', "Disconnected. Tap 'Connect' or say 'connect' to join the server.");
-}
+msg('System', "Disconnected. Tap 'Connect' or say 'connect' to join the server.");
+
 
 // Load XR Device permissions once and apply read-only UI if needed
 if (typeof window !== 'undefined') {
