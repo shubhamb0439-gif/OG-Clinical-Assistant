@@ -464,7 +464,13 @@ function createSignaling() {
         onDisconnected: () => {
             isServerConnected = false;
 
-            userWantsConnected = false; // prevent auto-reconnect after a manual disconnect
+            // ✅ Only clear intent on manual disconnect (not on network/refresh)
+            if (signaling?._manualClose) {
+                userWantsConnected = false;
+                persistedState.userWantsConnected = false;
+                saveState();
+            }
+
 
             setStatus(false);
             msg('System', 'Disconnected from server');
