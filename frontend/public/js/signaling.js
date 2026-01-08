@@ -241,11 +241,12 @@ export class SignalingClient {
     // Fresh session must start with clean outbox.
     this._outbox.length = 0;
 
-
-    // parity with Android: join + identify + request_device_list
-    this.socket.emit('join', this.xrId);
+    // ✅ Option B strict: identify only (no legacy join)
     this.socket.emit('identify', { deviceName: this.deviceName, xrId: this.xrId });
+
+    // Optional: request self-only list while waiting (server returns self-only when unpaired)
     this.socket.emit('request_device_list');
+
 
     // NOTE: do NOT flush outbox here.
     // We flush only after room_joined so pairing-sensitive commands can't fire too early.
@@ -279,6 +280,8 @@ export class SignalingClient {
     // Expected from server: { roomId, members? }
     const rid = evt?.roomId || null;
     this.roomId = rid;
+    try { this.socket?.emit('request_device_list'); } catch { }
+
     // Now that we have roomId, flush any queued signals that were waiting for pairing.
     // Now that we have roomId, flush only items queued for THIS connect generation.
     try {
