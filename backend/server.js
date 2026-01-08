@@ -609,35 +609,40 @@ async function buildDeviceListGlobal() {
   return list;
 }
 
-// ✅ NEW: Build device list strictly for a given room (pair isolation)
+// ✅ Build device list strictly for a given room (pair isolation)
+// ✅ FIX: do NOT use fetchSockets() (it is timing out with your adapter)
+// Instead: parse the canonical room name "pair:XR-A:XR-B" and use online maps.
 async function buildDeviceListForRoom(roomId) {
-  dlog('[DEVICE_LIST] building (room via fetchSockets):', roomId);
-  if (!roomId) return [];
+  dlog('[DEVICE_LIST] building (room by parsing roomId):', roomId);
+  if (!roomId || !roomId.startsWith('pair:')) return [];
 
-  const sockets = await safeFetchSockets(io, "/");
-  const byId = new Map();
+  // roomId format: "pair:XR-8000:XR-8005"
+  const parts = String(roomId).split(':');
+  const a = normXr(parts[1] || '');
+  const b = normXr(parts[2] || '');
 
-  for (const s of sockets) {
-    // ✅ Only include sockets that are actually in this room
-    if (!s?.rooms?.has(roomId)) continue;
+  const ids = [a, b].filter(Boolean);
+  const list = [];
 
-    const id = s?.data?.xrId;
-    if (!id) continue;
+  for (const id of ids) {
+    // Use your existing CI helper (preferred)
+    const s = getClientSocketByXrIdCI(id);
 
-    const b = batteryByDevice?.get(id) || {};
-    const t = telemetryByDevice?.get(id) || null;
+    // If not online, skip
+    if (!s || !s.connected) continue;
 
-    byId.set(id, {
+    const bRec = batteryByDevice?.get(id) || {};
+    const tRec = telemetryByDevice?.get(id) || null;
+
+    list.push({
       xrId: id,
       deviceName: s.data?.deviceName || 'Unknown',
-      battery: (typeof b.pct === 'number') ? b.pct : null,
-      charging: !!b.charging,
-      batteryTs: b.ts || null,
-      ...(t ? { telemetry: t } : {}),
+      battery: (typeof bRec.pct === 'number') ? bRec.pct : null,
+      charging: !!bRec.charging,
+      batteryTs: bRec.ts || null,
+      ...(tRec ? { telemetry: tRec } : {}),
     });
   }
-
-  const list = [...byId.values()];
 
   // ✅ Enforce strict one-to-one pair: max 2 devices
   if (list.length > 2) {
@@ -651,39 +656,33 @@ async function buildDeviceListForRoom(roomId) {
 
 
 
-// ✅ Updated: can broadcast globally (default) OR to a specific room if roomId is provided
+// ✅ Broadcast device list: global OR room-scoped (Option B safe)
 async function broadcastDeviceList(roomId) {
   dlog('[DEVICE_LIST] broadcast start', roomId ? `(room: ${roomId})` : '(global)');
+
   try {
-    const list = roomId ? await buildDeviceListForRoom(roomId) : await buildDeviceListGlobal();
+    const list = roomId
+      ? await buildDeviceListForRoom(roomId)   // ✅ MUST await
+      : await buildDeviceListGlobal();
 
     if (roomId) {
-      io.to(roomId).emit('device_list', list);  // ✅ room-only
+      io.to(roomId).emit('device_list', list); // ✅ room-only
     } else {
-      io.emit('device_list', list);             // ✅ unchanged global behavior
+      io.emit('device_list', list);            // ✅ legacy global
     }
 
-    dlog('[DEVICE_LIST] broadcast done (size:', list.length, ')', roomId ? `(room: ${roomId})` : '(global)');
+    dlog(
+      '[DEVICE_LIST] broadcast done (size:',
+      Array.isArray(list) ? list.length : 'INVALID',
+      ')',
+      roomId ? `(room: ${roomId})` : '(global)'
+    );
   } catch (e) {
-    dwarn('[DEVICE_LIST] Failed to build list:', e.message);
+    dwarn('[DEVICE_LIST] Failed to build list:', e?.message || e);
   }
 }
 
 
-// ✅ Updated: can broadcast empty list globally (default) OR to a specific room if roomId is provided
-function broadcastEmptyDeviceListOnce(roomId) {
-  try {
-    if (roomId) {
-      dlog('[DEVICE_LIST] broadcasting EMPTY list (room):', roomId);
-      io.to(roomId).emit('device_list', []);
-    } else {
-      dlog('[DEVICE_LIST] broadcasting EMPTY list (blackout/global)');
-      io.emit('device_list', []); // ✅ unchanged global behavior
-    }
-  } catch (e) {
-    dwarn('[DEVICE_LIST] empty broadcast failed:', e.message);
-  }
-}
 
 
 function addToMessageHistory(message) {
@@ -3457,9 +3456,9 @@ io.on('connection', (socket) => {
   // after sending message_history (or right at the top of the connection handler)
   (async () => {
     try {
-      // send current presence snapshot
-      const list = await buildDeviceListGlobal();
-      socket.emit('device_list', list);
+      // ✅ Option B strict: do NOT send global device list before pairing.
+      // Client will request room-scoped list after room_joined.
+      socket.emit('device_list', []);
 
       // send current active pair snapshot
       socket.emit('room_update', { pairs: collectPairs() });
@@ -3468,23 +3467,54 @@ io.on('connection', (socket) => {
     }
   })();
 
-  // -------- join --------
-  socket.on('join', (xrId) => {
-    dlog('[EVENT] join', xrId);
-    socket.data.xrId = xrId;
-    socket.join(roomOf(xrId));
-    clients.set(xrId, socket);
-    onlineDevices.set(xrId, socket);
-    (async () => {
-      try {
-        const list = await buildDeviceListGlobal();
-        socket.emit('device_list', list);
-        await broadcastDeviceList();
-      } catch (e) {
-        derr('[join] broadcast err:', e.message);
+  // -------- join (legacy) --------
+  // ✅ Option B strict: keep join for backward compatibility, but NEVER leak global device lists.
+  // ✅ Behavior:
+  //   - Register xrId on this socket
+  //   - Attempt DB auto-pair immediately
+  //   - If paired → broadcast room-only device list
+  //   - If not paired → emit self-only device list
+  socket.on('join', async (xrId) => {
+    const XR = normXr(xrId);
+    dlog('[EVENT] join', XR);
+    if (!XR) return;
+
+    socket.data.xrId = XR;
+
+    // ❌ IMPORTANT (Option B): do NOT join per-xr legacy rooms.
+    // socket.join(roomOf(XR));
+
+    clients.set(XR, socket);
+    onlineDevices.set(XR, socket);
+
+    try {
+      await tryDbAutoPair(XR);
+
+      const roomId = socket.data?.roomId;
+      if (roomId) {
+        await broadcastDeviceList(roomId);   // ✅ room-only list
+        return;
       }
-    })();
+
+      // ✅ not paired yet → self-only list
+      const b = batteryByDevice?.get(XR) || {};
+      const t = telemetryByDevice?.get(XR) || null;
+
+      socket.emit('device_list', [{
+        xrId: XR,
+        deviceName: socket.data?.deviceName || 'Unknown',
+        battery: (typeof b.pct === 'number') ? b.pct : null,
+        charging: !!b.charging,
+        batteryTs: b.ts || null,
+        ...(t ? { telemetry: t } : {}),
+      }]);
+    } catch (e) {
+      derr('[join] err:', e.message);
+      try { socket.emit('device_list', []); } catch { }
+    }
   });
+
+
 
 
   // -------- identify --------
@@ -3518,9 +3548,20 @@ io.on('connection', (socket) => {
           socketId: holder.id,
         };
         dlog('[IDENTIFY] Duplicate xrId detected — disconnecting old socket, keeping new:', holderInfo);
+        // ✅ Capture partner BEFORE clearing pairing so we can clear partner socket roomId too
+        const oldPartner = pairedWith.get(XR) || null;
+
 
         // Clear stale pairing state for this XR (and its partner) so re-pair works cleanly
         clearPairByXrId(XR);
+        // ✅ Also clear partner socket roomId (prevents stale "I'm still paired" state)
+        if (oldPartner) {
+          const pSock = getClientSocketByXrIdCI(oldPartner);
+          if (pSock) {
+            try { pSock.data.roomId = null; } catch { }
+          }
+        }
+
 
         // Best-effort: disconnect the old socket
         try {
