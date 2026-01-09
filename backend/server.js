@@ -159,6 +159,33 @@ if (IS_PROD && process.env.REDIS_URL) {
   });
 }
 
+// -------------------- XR Runtime Redis (Owner Locks) --------------------
+// Separate Redis client for XR online/offline authority (Option B)
+let xrRedis = null;
+
+if (IS_PROD && process.env.REDIS_URL) {
+  xrRedis = createClient({
+    url: process.env.REDIS_URL,
+    socket: {
+      tls: (process.env.REDIS_URL || '').startsWith('rediss://'),
+    },
+  });
+
+  xrRedis.on('error', (err) =>
+    console.error('[XR][REDIS] error', err)
+  );
+
+  xrRedis.connect().then(
+    () => console.log('[XR][REDIS] connected'),
+    (err) =>
+      console.error(
+        '[XR][REDIS] connect failed (continuing)',
+        err?.message || err
+      )
+  );
+}
+
+
 
 // Session middleware for platform admin
 const sessionSecret = process.env.SESSION_SECRET || 'change-me-in-production';
@@ -668,8 +695,15 @@ async function broadcastDeviceList(roomId) {
     if (roomId) {
       io.to(roomId).emit('device_list', list); // ✅ room-only
     } else {
-      io.emit('device_list', list);            // ✅ legacy global
+      // Option B production safety: never broadcast global device_list
+      // Global lists cause cross-pair UI contamination when multiple devices are online.
+      if (IS_PROD) {
+        dwarn('[DEVICE_LIST] Refusing global broadcast in prod (Option B).');
+        return;
+      }
+      io.emit('device_list', list); // keep legacy behavior in dev only
     }
+
 
     dlog(
       '[DEVICE_LIST] broadcast done (size:',
@@ -3161,8 +3195,13 @@ app.post('/desktop-telemetry', (req, res) => {
       deviceTempC: rec.deviceTempC,
     });
 
-    // broadcast to dashboards (same event Android uses)
-    io.emit('telemetry_update', rec);
+    // Option B: do not broadcast telemetry globally in prod.
+    // Desktop HTTP telemetry is not tied to a socket room, so in prod we only emit to dev global.
+    // (If you later include roomId in the POST body, we can route it to that room.)
+    if (!IS_PROD) {
+      io.emit('telemetry_update', rec); // dev only
+    }
+
 
     dlog('[desktop-telemetry] update', rec);
     res.status(204).end();
@@ -3441,6 +3480,27 @@ async function checkSoapMedicationAvailability(soapNote, opts = {}) {
   return { results };
 }
 
+// -------------------- XR Owner Lock Helpers --------------------
+async function releaseOwnerLockIfOwned(xrId, socketId) {
+  try {
+    if (!IS_PROD || !xrRedis) return;
+
+    const XR = normXr(xrId);
+    if (!XR || !socketId) return;
+
+    const key = `xr:owner:${XR}`;
+    const currentOwner = await xrRedis.get(key);
+
+    if (currentOwner === socketId) {
+      await xrRedis.del(key);
+      dlog('[OWNER_LOCK] released', { xrId: XR });
+    }
+  } catch (e) {
+    dwarn('[OWNER_LOCK] release failed', e?.message || e);
+  }
+}
+
+
 // -------------------- Socket.IO Handlers --------------------
 io.on('connection', (socket) => {
   console.log(`🔌 [CONNECTION] ${socket.id}`);
@@ -3458,7 +3518,7 @@ io.on('connection', (socket) => {
     try {
       // ✅ Option B strict: do NOT send global device list before pairing.
       // Client will request room-scoped list after room_joined.
-      socket.emit('device_list', []);
+      // socket.emit('device_list', []);
 
       // send current active pair snapshot
       socket.emit('room_update', { pairs: collectPairs() });
@@ -3510,8 +3570,23 @@ io.on('connection', (socket) => {
       }]);
     } catch (e) {
       derr('[join] err:', e.message);
-      try { socket.emit('device_list', []); } catch { }
+
+      // Option B safety: never wipe device list to [] (causes UI drift).
+      // Fallback to self-only so the UI stays stable.
+      try {
+        const b = batteryByDevice?.get(XR) || {};
+        const t = telemetryByDevice?.get(XR) || null;
+        socket.emit('device_list', [{
+          xrId: XR,
+          deviceName: socket.data?.deviceName || 'Unknown',
+          battery: (typeof b.pct === 'number') ? b.pct : null,
+          charging: !!b.charging,
+          batteryTs: b.ts || null,
+          ...(t ? { telemetry: t } : {}),
+        }]);
+      } catch { }
     }
+
   });
 
 
@@ -3582,6 +3657,17 @@ io.on('connection', (socket) => {
     // ✅ Accept this socket
     socket.data.deviceName = deviceName || 'Unknown';
     socket.data.xrId = XR;
+
+    // ✅ Option B: Redis owner lock (authoritative online/offline)
+    try {
+      if (IS_PROD && xrRedis) {
+        await xrRedis.set(`xr:owner:${XR}`, socket.id);
+        dlog('[OWNER_LOCK] set', { xrId: XR, socketId: socket.id });
+      }
+    } catch (e) {
+      dwarn('[OWNER_LOCK] set failed (continuing):', e?.message || e);
+    }
+
     socket.data.connectedAt = Date.now();
 
     // try { await socket.join(roomOf(XR)); }
@@ -4026,9 +4112,12 @@ io.on('connection', (socket) => {
       dlog('[status_report] room emit', roomId);
       io.to(roomId).emit('status_report', payload);
     } else {
-      dlog('[status_report] global emit');
+      // Option B safety: no global status_report in prod (prevents cross-pair noise)
+      if (IS_PROD) return;
+      dlog('[status_report] global emit (dev only)');
       io.emit('status_report', payload);
     }
+
   });
 
   // -------- battery (NEW) --------
@@ -4040,7 +4129,15 @@ io.on('connection', (socket) => {
       const rec = { pct, charging: !!charging, ts: Date.now() };
 
       batteryByDevice.set(id, rec);
-      io.emit('battery_update', { xrId: id, pct: rec.pct, charging: rec.charging, ts: rec.ts });
+      const roomId = socket.data?.roomId;
+      if (roomId) {
+        io.to(roomId).emit('battery_update', { xrId: id, pct: rec.pct, charging: rec.charging, ts: rec.ts });
+      } else if (!IS_PROD) {
+        io.emit('battery_update', { xrId: id, pct: rec.pct, charging: rec.charging, ts: rec.ts }); // dev only
+      } else {
+        socket.emit('battery_update', { xrId: id, pct: rec.pct, charging: rec.charging, ts: rec.ts }); // prod self-only
+      }
+
       dlog('[battery] update', { id, pct: rec.pct, charging: rec.charging });
     } catch (e) {
       dwarn('[battery] bad payload:', e?.message || e);
@@ -4103,7 +4200,16 @@ io.on('connection', (socket) => {
       });
 
       // broadcast the latest snapshot to dashboards
-      io.emit('telemetry_update', rec);
+      // Option B: keep telemetry inside pair room in prod to prevent cross-pair UI contamination
+      const roomId = socket.data?.roomId;
+      if (roomId) {
+        io.to(roomId).emit('telemetry_update', rec);
+      } else if (!IS_PROD) {
+        io.emit('telemetry_update', rec); // dev only
+      } else {
+        socket.emit('telemetry_update', rec); // prod self-only
+      }
+
 
       dlog('[telemetry] update', rec);
     } catch (e) {
@@ -4150,7 +4256,16 @@ io.on('connection', (socket) => {
       });
 
       // existing broadcast (summary tiles)
-      io.emit('webrtc_quality_update', Array.from(qualityByDevice.values()));
+      // Option B: keep quality updates inside pair room in prod
+      const roomId = socket.data?.roomId;
+      if (roomId) {
+        io.to(roomId).emit('webrtc_quality_update', Array.from(qualityByDevice.values()));
+      } else if (!IS_PROD) {
+        io.emit('webrtc_quality_update', Array.from(qualityByDevice.values())); // dev only
+      } else {
+        socket.emit('webrtc_quality_update', Array.from(qualityByDevice.values())); // prod self-only
+      }
+
     } catch (e) {
       dwarn('[QUALITY] store/broadcast failed:', e?.message || e);
     }
@@ -4170,22 +4285,24 @@ io.on('connection', (socket) => {
 
 
 
-  // Notify peers *before* Socket.IO removes the socket from rooms
-  // Notify peers *before* Socket.IO removes the socket from rooms
-  socket.on('disconnecting', () => {
-    const xrId = normXr(socket.data?.xrId);
-    if (!xrId) return;
 
-    for (const roomId of socket.rooms) {
-      if (roomId.startsWith('pair:')) {
-        socket.to(roomId).emit('peer_left', { xrId, roomId });
-        // optional compatibility ping
-        socket.to(roomId).emit('desktop_disconnected', { xrId, roomId });
 
-        dlog('[disconnecting] notified peer_left', { xrId, roomId });
-        // ✅ NEW: update ONLY this room's device list (prevents global leak)
+  // ✅ IMPORTANT: disconnecting runs before Socket.IO removes the socket from rooms.
+  // We use it ONLY to notify the peer. Never emit device_list here.
+  socket.on('disconnecting', (reason) => {
+    try {
+      const xrId = normXr(socket.data?.xrId);
+      const roomId = socket.data?.roomId;
+      dlog('⚠️ [EVENT] disconnecting', { reason, xrId, roomId });
 
+      if (roomId) {
+        io.to(roomId).emit('peer_left', { xrId, roomId, reason });
+
+        // keep legacy compatibility (was in the removed handler)
+        io.to(roomId).emit('desktop_disconnected', { xrId, roomId, reason });
       }
+    } catch (e) {
+      derr('[disconnecting] error:', e?.message || e);
     }
   });
 
@@ -4203,6 +4320,9 @@ io.on('connection', (socket) => {
     try {
       const xrId = normXr(socket.data?.xrId);
       if (xrId) {
+        // ✅ PROD: release Redis online owner lock so device_list can't go stale
+        await releaseOwnerLockIfOwned(xrId, socket.id);
+
         // Remove from your in-memory maps
         clients.delete(xrId);
         onlineDevices.delete(xrId);
@@ -4225,7 +4345,10 @@ io.on('connection', (socket) => {
         }
 
         // ✅ Broadcast device list ONLY to the pair room
-        await broadcastDeviceList(roomIdAtDisconnect);
+        if (roomIdAtDisconnect) {
+          await broadcastDeviceList(roomIdAtDisconnect);
+        }
+
 
         // ✅ After Socket.IO prunes rooms, reflect pair changes
         setTimeout(() => {
