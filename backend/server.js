@@ -533,17 +533,36 @@ async function tryDbAutoPair(deviceId) {
   const partnerXr = normXr(partnerId);
   if (!partnerXr || partnerXr === meXr) return false;
 
-  const meSocket = getClientSocketByXrIdCI(meXr);
-  const partnerSocket = getClientSocketByXrIdCI(partnerXr);
-  if (!meSocket || !partnerSocket) return false;
-
-  // 🔒 REDIS PAIR LOCK (authoritative, cross-instance)
-  const pairKey = `xr:pair:${[meXr, partnerXr].sort().join(':')}`;
+  // ✅ MULTI-INSTANCE SAFE: resolve socket ids from Redis owner locks
+  let mySid = null;
+  let partnerSid = null;
 
   if (redisPub) {
-    const locked = await redisPub.set(pairKey, '1', { NX: true, EX: 30 });
+    [mySid, partnerSid] = await Promise.all([
+      redisPub.get(`xr:owner:${meXr}`),
+      redisPub.get(`xr:owner:${partnerXr}`),
+    ]);
+  }
+
+  if (!mySid || !partnerSid) {
+    dlog('[DB_AUTO_PAIR] partner not online yet (missing owner sid)', {
+      meXr, partnerXr, mySid: !!mySid, partnerSid: !!partnerSid
+    });
+    return false;
+  }
+
+
+  // 🔒 REDIS PAIR LOCK (authoritative, cross-instance)
+  const pairId = [meXr, partnerXr].sort().join(':');
+  const lockKey = `xr:pairlock:${pairId}`;
+  const pairKey = `xr:pair:${pairId}`;
+
+
+  if (redisPub) {
+    const locked = await redisPub.set(lockKey, '1', { NX: true, EX: 30 });
     if (!locked) {
-      dlog('[DB_AUTO_PAIR] pair already locked by another instance', pairKey);
+      dlog('[DB_AUTO_PAIR] pair already locked by another instance', lockKey);
+
       return false;
     }
   }
@@ -557,14 +576,25 @@ async function tryDbAutoPair(deviceId) {
 
     const roomId = getRoomIdForPair(meXr, partnerXr);
 
-    await meSocket.join(roomId);
-    await partnerSocket.join(roomId);
+    // ✅ Cross-instance join (requires: mySid + partnerSid already fetched from Redis owner locks)
+    await io.in(mySid).socketsJoin(roomId);
+    await io.in(partnerSid).socketsJoin(roomId);
 
-    meSocket.data.roomId = roomId;
-    partnerSocket.data.roomId = roomId;
+    // ✅ Ensure socket.data.roomId is set for both sockets (cluster-wide)
+    const socketsInRoom = await io.in(roomId).fetchSockets();
+    for (const s of socketsInRoom) {
+      try { s.data.roomId = roomId; } catch { }
+    }
+    // ✅ Mark pair as active for dashboards / broadcastPairs (separate from lock)
+    if (redisPub) {
+      await redisPub.set(pairKey, '1', { EX: 300 }); // 5 min TTL; tune as needed
+    }
 
+
+    // (Optional) keep local map for legacy logic / quick lookups (harmless in multi-instance)
     pairedWith.set(meXr, partnerXr);
     pairedWith.set(partnerXr, meXr);
+
 
     const members = [meXr, partnerXr];
     dlog('[DB_AUTO_PAIR] paired', { roomId, members });
@@ -581,7 +611,7 @@ async function tryDbAutoPair(deviceId) {
   } finally {
     // Release lock after room is established
     if (redisPub) {
-      redisPub.del(pairKey).catch(() => { });
+      redisPub.del(lockKey).catch(() => { });
     }
   }
 }
@@ -3678,17 +3708,18 @@ io.on('connection', (socket) => {
 
         // 1) Claim ownership for this XR to THIS socket.id (with TTL)
         //    Whoever writes last wins.
-        await redisPub.set(key, mySid, { EX: 120 }); // 2 min TTL
-
-        // 2) Read back immediately: if it isn't me, I lost the race → disconnect myself
+        await redisPub.set(key, mySid, { EX: 120 });
         const owner = await redisPub.get(key);
-        if (owner && owner !== mySid) {
+
+        // if someone overwrote us immediately after, we should yield
+        if (owner !== mySid) {
           dwarn('[IDENTIFY] Lost ownership race (another instance holds XR). Disconnecting self.', {
             xrId: XR, mine: mySid, owner
           });
           try { socket.emit('replaced_by_new_session', { xrId: XR }); } catch { }
           return socket.disconnect(true);
         }
+
 
         // 3) I am the owner now. If this instance also has an old local holder socket, kick it.
         const local = Array.from(io.of("/").sockets.values());
