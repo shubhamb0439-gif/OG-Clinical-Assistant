@@ -709,45 +709,83 @@ async function buildDeviceListGlobal() {
 // ✅ FIX: do NOT use fetchSockets() (it is timing out with your adapter)
 // Instead: parse the canonical room name "pair:XR-A:XR-B" and use online maps.
 async function buildDeviceListForRoom(roomId) {
-  dlog('[DEVICE_LIST] ▶ buildDeviceListForRoom called with:', roomId);
+  const stamp = new Date().toISOString();
+  const inst = process.env.WEBSITE_INSTANCE_ID || process.env.COMPUTERNAME || 'local';
+  dlog(`[DEVICE_LIST][${stamp}][${inst}] ▶ buildDeviceListForRoom called`, { roomId });
 
   if (!roomId || !roomId.startsWith('pair:')) {
-    dwarn('[DEVICE_LIST] invalid or non-pair roomId:', roomId);
+    dwarn(`[DEVICE_LIST][${stamp}][${inst}] invalid or non-pair roomId`, { roomId });
     return [];
   }
 
-  // ✅ Cluster-safe path (Redis adapter)
+  // Local room size (IMPORTANT: this is instance-local even with Redis adapter)
+  try {
+    const localRoom = io?.sockets?.adapter?.rooms?.get?.(roomId);
+    dlog(`[DEVICE_LIST][${stamp}][${inst}] local adapter room size`, {
+      roomId,
+      localRoomSize: localRoom ? localRoom.size : 0,
+      ioRedisReady,
+      IS_PROD,
+      adapterName: io?.sockets?.adapter?.constructor?.name || 'unknown',
+    });
+  } catch (e) {
+    dwarn(`[DEVICE_LIST][${stamp}][${inst}] failed reading local room size`, e?.message || e);
+  }
+
+  // ✅ Cluster-safe path (Redis adapter must be READY)
   if (IS_PROD && ioRedisReady && typeof io?.in === 'function') {
-    dlog('[DEVICE_LIST] attempting cluster fetchSockets for room:', roomId);
+    dlog(`[DEVICE_LIST][${stamp}][${inst}] attempting CLUSTER fetchSockets`, { roomId });
 
+    let sockets;
     try {
-      const sockets = await Promise.race([
+      sockets = await Promise.race([
         io.in(roomId).fetchSockets(),
-        new Promise((_, rej) =>
-          setTimeout(() => rej(new Error('room fetchSockets timeout')), 1500)
-        ),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('room fetchSockets timeout')), 1500)),
       ]);
+    } catch (e) {
+      dwarn(`[DEVICE_LIST][${stamp}][${inst}] ❌ cluster fetchSockets failed`, {
+        roomId,
+        err: e?.message || e,
+        ioRedisReady,
+        adapterName: io?.sockets?.adapter?.constructor?.name,
+      });
+      // fallthrough to local parse
+      sockets = null;
+    }
 
-      dlog(
-        '[DEVICE_LIST] fetchSockets returned',
-        Array.isArray(sockets) ? sockets.length : 'INVALID',
-        'sockets for room:',
-        roomId
-      );
+    if (Array.isArray(sockets)) {
+      dlog(`[DEVICE_LIST][${stamp}][${inst}] fetchSockets returned`, {
+        roomId,
+        count: sockets.length,
+        sockets: sockets.map(s => ({
+          sid: s.id,
+          xrId: s?.data?.xrId,
+          deviceName: s?.data?.deviceName,
+          connected: s.connected,
+          roomId: s?.data?.roomId,
+        })),
+      });
 
       const list = [];
-
-      for (const s of sockets || []) {
-        const xrIdRaw = s?.data?.xrId;
-        const id = normXr(xrIdRaw);
+      for (const s of sockets) {
+        const id = normXr(s?.data?.xrId);
 
         if (!id) {
-          dwarn('[DEVICE_LIST] socket missing xrId:', s?.id);
+          dwarn(`[DEVICE_LIST][${stamp}][${inst}] socket missing xrId`, { sid: s?.id });
           continue;
         }
 
         const bRec = batteryByDevice?.get(id) || {};
         const tRec = telemetryByDevice?.get(id) || null;
+
+        // Key debug: are these maps missing because telemetry/battery was stored on another instance?
+        dlog(`[DEVICE_LIST][${stamp}][${inst}] snapshot for xr`, {
+          xrId: id,
+          hasBattery: typeof bRec.pct === 'number',
+          hasTelemetry: !!tRec,
+          batteryTs: bRec.ts || null,
+          telemetryTs: tRec?.ts || null,
+        });
 
         list.push({
           xrId: id,
@@ -759,43 +797,41 @@ async function buildDeviceListForRoom(roomId) {
         });
       }
 
-      // Enforce strict 1:1
-      const unique = Array.from(
-        new Map(list.map(x => [x.xrId, x])).values()
-      ).slice(0, 2);
-
-      dlog(
-        '[DEVICE_LIST] ✅ built (room/cluster)',
-        roomId,
-        unique.map(d => d.xrId)
-      );
-
+      const unique = Array.from(new Map(list.map(x => [x.xrId, x])).values()).slice(0, 2);
+      dlog(`[DEVICE_LIST][${stamp}][${inst}] ✅ built (cluster)`, { roomId, xrIds: unique.map(x => x.xrId) });
       return unique;
-    } catch (e) {
-      dwarn(
-        '[DEVICE_LIST] ❌ cluster fetchSockets failed; falling back to local parse:',
-        e?.message || e
-      );
+    } else {
+      dwarn(`[DEVICE_LIST][${stamp}][${inst}] fetchSockets returned NON-array`, { roomId, socketsType: typeof sockets });
     }
+  } else {
+    dlog(`[DEVICE_LIST][${stamp}][${inst}] CLUSTER path not used`, {
+      IS_PROD,
+      ioRedisReady,
+      hasIoIn: typeof io?.in === 'function',
+      adapterName: io?.sockets?.adapter?.constructor?.name || 'unknown',
+    });
   }
 
-  // ---- Fallback: local-only (dev or adapter not ready) ----
-  dlog('[DEVICE_LIST] using LOCAL fallback for room:', roomId);
+  // ---- Fallback: local-only ----
+  dlog(`[DEVICE_LIST][${stamp}][${inst}] using LOCAL fallback`, { roomId });
 
   const parts = String(roomId).split(':');
   const a = normXr(parts[1] || '');
   const b = normXr(parts[2] || '');
   const ids = [a, b].filter(Boolean);
 
-  dlog('[DEVICE_LIST] parsed room members:', ids);
+  dlog(`[DEVICE_LIST][${stamp}][${inst}] parsed ids from room`, { roomId, ids });
 
   const list = [];
-
   for (const id of ids) {
     const s = getClientSocketByXrIdCI(id);
 
     if (!s || !s.connected) {
-      dwarn('[DEVICE_LIST] local socket not found or disconnected:', id);
+      dwarn(`[DEVICE_LIST][${stamp}][${inst}] local socket missing/disconnected`, {
+        xrId: id,
+        found: !!s,
+        connected: !!s?.connected,
+      });
       continue;
     }
 
@@ -813,15 +849,11 @@ async function buildDeviceListForRoom(roomId) {
   }
 
   const finalList = list.slice(0, 2);
-
-  dlog(
-    '[DEVICE_LIST] built (room/local)',
-    roomId,
-    finalList.map(d => d.xrId)
-  );
-
+  dlog(`[DEVICE_LIST][${stamp}][${inst}] built (local)`, { roomId, xrIds: finalList.map(x => x.xrId) });
   return finalList;
 }
+
+
 
 
 
