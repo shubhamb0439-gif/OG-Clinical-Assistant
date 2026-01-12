@@ -30,6 +30,11 @@ const { getAzureSqlConnection } = require('./database/azure-db-helper');
 
 console.log('[BOOT] Instance:', process.env.WEBSITE_INSTANCE_ID || process.pid);
 
+// -------------------- Process-level safety --------------------
+process.on('unhandledRejection', (err) => {
+  console.error('[FATAL] unhandledRejection:', err?.stack || err);
+});
+
 // -------------------- Debug helpers --------------------
 const DEBUG_LOGS = (process.env.DEBUG_LOGS || 'true').toLowerCase() === 'true';
 function dlog(...args) {
@@ -126,7 +131,6 @@ if (IS_PROD && process.env.REDIS_URL) {
   const pubClient = createClient({
     url: process.env.REDIS_URL,
     socket: {
-      tls: (process.env.REDIS_URL || '').startsWith('rediss://'),
       keepAlive: 5000,
       reconnectStrategy: (retries) => Math.min(retries * 200, 2000),
     },
@@ -157,6 +161,39 @@ app.use(cors());
 app.use(express.json());
 console.log('[MIDDLEWARE] CORS + JSON enabled');
 
+// -------------------- Redis Client Factory (Stability Hardened) --------------------
+function createStableRedisClient(url, tag) {
+  const client = createClient({
+    url,
+    socket: {
+      keepAlive: 10000,
+      connectTimeout: 10000,
+      reconnectStrategy: (retries) => {
+        // backoff: 200ms → 2s max
+        return Math.min(200 + retries * 200, 2000);
+      },
+    },
+  });
+
+  client.on('error', (e) =>
+    console.error(`[${tag}][REDIS] error`, e?.message || e)
+  );
+  client.on('reconnecting', () =>
+    console.warn(`[${tag}][REDIS] reconnecting...`)
+  );
+  client.on('ready', () =>
+    console.log(`[${tag}][REDIS] ready`)
+  );
+  client.on('end', () =>
+    console.warn(`[${tag}][REDIS] connection ended`)
+  );
+
+  return client;
+}
+
+
+
+
 // -------------------- Session Store (Prod: Redis) --------------------
 let sessionStore;
 
@@ -165,16 +202,12 @@ if (IS_PROD && process.env.REDIS_URL) {
   // connect-redis v9 CommonJS: class is usually at .RedisStore
   const RedisStore = connectRedis.RedisStore || connectRedis.default || connectRedis;
 
-  const sessionRedis = createClient({
-    url: process.env.REDIS_URL,
-    socket: {
-      tls: (process.env.REDIS_URL || '').startsWith('rediss://'),
-    },
-  });
-
-  sessionRedis.on('error', (err) =>
-    console.error('[SESSION][REDIS] error', err)
+  const sessionRedis = createStableRedisClient(
+    process.env.REDIS_URL,
+    'SESSION'
   );
+
+
 
   sessionRedis.connect().then(
     () => console.log('[SESSION][REDIS] connected'),
@@ -196,16 +229,12 @@ if (IS_PROD && process.env.REDIS_URL) {
 let xrRedis = null;
 
 if (IS_PROD && process.env.REDIS_URL) {
-  xrRedis = createClient({
-    url: process.env.REDIS_URL,
-    socket: {
-      tls: (process.env.REDIS_URL || '').startsWith('rediss://'),
-    },
-  });
-
-  xrRedis.on('error', (err) =>
-    console.error('[XR][REDIS] error', err)
+  xrRedis = createStableRedisClient(
+    process.env.REDIS_URL,
+    'XR'
   );
+
+
 
   xrRedis.connect().then(
     () => console.log('[XR][REDIS] connected'),
@@ -547,6 +576,19 @@ async function resolveXrIdByUserId(userId) {
   return xr ? String(xr).trim() : null;
 }
 
+async function findSocketByXrIdCI_Cluster(xrId) {
+  const XR = normXr(xrId);
+  if (!XR) return null;
+
+  const sockets = await safeFetchSockets(io, "/");
+  return sockets.find(s =>
+    s?.connected &&
+    typeof s.data?.xrId === "string" &&
+    normXr(s.data.xrId) === XR
+  ) || null;
+}
+
+
 async function tryDbAutoPair(deviceId) {
   dlog('[DB_AUTO_PAIR] attempt for', deviceId);
 
@@ -554,19 +596,17 @@ async function tryDbAutoPair(deviceId) {
     const stalePartner = clearPairByXrId(deviceId);
     dlog('[DB_AUTO_PAIR] cleared stale pairing for', deviceId, 'oldPartner=', stalePartner);
 
-    // Also clear stale socket roomId state (safe even if already null)
-    const meSock = getClientSocketByXrIdCI(deviceId);
+    // Also clear stale socket roomId state (safe even if already null) — CLUSTER-AWARE
+    const meSock = await findSocketByXrIdCI_Cluster(deviceId);
     if (meSock) meSock.data.roomId = null;
 
     if (stalePartner) {
-      const pSock = getClientSocketByXrIdCI(stalePartner);
+      const pSock = await findSocketByXrIdCI_Cluster(stalePartner);
       if (pSock) pSock.data.roomId = null;
     }
 
     // Do NOT return; continue attempting fresh DB pairing
   }
-
-
 
   const myUserId = await resolveUserIdByXrId(deviceId);
   dlog('[DB_AUTO_PAIR] myUserId:', myUserId);
@@ -591,7 +631,6 @@ async function tryDbAutoPair(deviceId) {
   const partnerSocket = await findSocketByXrIdCI_Cluster(partnerXr);
   if (!meSocket || !partnerSocket) return false;
 
-
   if (isAlreadyPaired(deviceId) || isAlreadyPaired(partnerXr)) {
     dlog('[DB_AUTO_PAIR] one side already paired, skipping');
     return false;
@@ -601,7 +640,6 @@ async function tryDbAutoPair(deviceId) {
   const room = io.sockets.adapter.rooms.get(roomId);
   const memberCount = room ? room.size : 0;
   dlog('[DB_AUTO_PAIR] roomId:', roomId, 'current members:', memberCount, '(not used to block pairing)');
-
 
   await meSocket.join(roomId);
   await partnerSocket.join(roomId);
@@ -619,11 +657,10 @@ async function tryDbAutoPair(deviceId) {
 
   await broadcastDeviceList(roomId);
 
-
-
   broadcastPairs();
   return true;
 }
+
 
 
 // -------------------- Utilities --------------------
