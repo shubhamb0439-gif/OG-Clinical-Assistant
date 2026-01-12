@@ -119,6 +119,38 @@ const io = new Server(server, {
 
 console.log('[SOCKET.IO] Socket.IO server initialized');
 
+// -------------------- Socket.IO Redis Adapter (MANDATORY for multi-instance) --------------------
+let ioRedisReady = false;
+
+if (IS_PROD && process.env.REDIS_URL) {
+  const pubClient = createClient({
+    url: process.env.REDIS_URL,
+    socket: {
+      tls: (process.env.REDIS_URL || '').startsWith('rediss://'),
+      keepAlive: 5000,
+      reconnectStrategy: (retries) => Math.min(retries * 200, 2000),
+    },
+  });
+
+  const subClient = pubClient.duplicate();
+
+  pubClient.on('error', (err) => console.error('[SOCKET.IO][REDIS][PUB] error', err));
+  subClient.on('error', (err) => console.error('[SOCKET.IO][REDIS][SUB] error', err));
+
+  Promise.all([pubClient.connect(), subClient.connect()])
+    .then(() => {
+      io.adapter(createAdapter(pubClient, subClient));
+      ioRedisReady = true;
+      console.log('[SOCKET.IO][REDIS] adapter attached (multi-instance room sync ON)');
+    })
+    .catch((err) => {
+      console.error('[SOCKET.IO][REDIS] adapter connect failed (continuing WITHOUT adapter):', err?.message || err);
+      // NOTE: continuing keeps existing functionality, but multi-instance device_list will remain inconsistent.
+    });
+} else {
+  console.log('[SOCKET.IO][REDIS] adapter not enabled (dev or missing REDIS_URL)');
+}
+
 
 // -------------------- Middleware --------------------
 app.use(cors());
@@ -555,10 +587,10 @@ async function tryDbAutoPair(deviceId) {
     return false;
   }
 
-  const meSocket = getClientSocketByXrIdCI(deviceId);
-  const partnerSocket = getClientSocketByXrIdCI(partnerXr);
-  dlog('[DB_AUTO_PAIR] me?', !!meSocket, 'partner?', !!partnerSocket);
+  const meSocket = await findSocketByXrIdCI_Cluster(deviceId);
+  const partnerSocket = await findSocketByXrIdCI_Cluster(partnerXr);
   if (!meSocket || !partnerSocket) return false;
+
 
   if (isAlreadyPaired(deviceId) || isAlreadyPaired(partnerXr)) {
     dlog('[DB_AUTO_PAIR] one side already paired, skipping');
@@ -653,10 +685,9 @@ async function buildDeviceListForRoom(roomId) {
 
   for (const id of ids) {
     // Use your existing CI helper (preferred)
-    const s = getClientSocketByXrIdCI(id);
-
-    // If not online, skip
+    const s = await findSocketByXrIdCI_Cluster(id);
     if (!s || !s.connected) continue;
+
 
     const bRec = batteryByDevice?.get(id) || {};
     const tRec = telemetryByDevice?.get(id) || null;
@@ -3212,25 +3243,7 @@ app.post('/desktop-telemetry', (req, res) => {
 });
 
 
-// -------------------- Redis Adapter --------------------
-(async () => {
-  try {
-    const REDIS_URL = process.env.REDIS_URL;
-    if (REDIS_URL) {
-      const useTls = (process.env.REDIS_TLS || 'true').toLowerCase() === 'true';
-      dlog('[REDIS] connecting', { REDIS_URL: trimStr(REDIS_URL, 80), useTls });
-      const pub = createClient({ url: REDIS_URL, socket: { tls: useTls } });
-      const sub = pub.duplicate();
-      await Promise.all([pub.connect(), sub.connect()]);
-      io.adapter(createAdapter(pub, sub));
-      console.log('[SOCKET.IO] Redis adapter attached');
-    } else {
-      dwarn('[SOCKET.IO] No REDIS_URL set. Running without Redis adapter.');
-    }
-  } catch (e) {
-    derr('[SOCKET.IO] Redis adapter failed; continuing in-memory:', e.message);
-  }
-})();
+
 
 // ---- Medication sanitizer: keep only "pure" medication (name ± strength) ----
 function normalizeMedicationList(raw) {
