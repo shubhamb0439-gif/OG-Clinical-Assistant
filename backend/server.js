@@ -685,11 +685,16 @@ async function tryDbAutoPair(deviceId, debugSocket = null) {
   });
 
   if (!meSocket || !partnerSocket) {
-    if (debugSocket) dbgToSocket(debugSocket, "[DB_AUTO_PAIR] bail: missing socket(s)", {
-      note: "If partnerSocket=false, look at [PAIR][FIND] scanned sockets sample for dataXrId / namespace mismatch."
+    if (debugSocket) dbgToSocket(debugSocket, "[DB_AUTO_PAIR] missing socket(s) — retry scheduled", {
+      meSocket: !!meSocket,
+      partnerSocket: !!partnerSocket,
+      partnerXr
     });
+
+    schedulePairRetry(meXr);   // 🔑 THIS IS THE FIX
     return false;
   }
+
 
   if (isAlreadyPaired(deviceId) || isAlreadyPaired(partnerXr)) {
     if (debugSocket) dbgToSocket(debugSocket, "[DB_AUTO_PAIR] bail: one side already paired", { meXr, partnerXr });
