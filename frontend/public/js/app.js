@@ -1,6 +1,6 @@
 // --------------------------------27-5:12-----/////////-------------App.js ----------------duplicate id working version ----29-08-25------------------------------------
 
-// --------------------------------------------16:6--------------23-09-25 --------------dashbaord and cockpit working verison============================
+// -------------------------------------------- --------------dashbaord and cockpit working verison============================
 console.log('[INIT] Initializing DOM elements');
 const videoElement = document.getElementById('xrVideo');
 const statusElement = document.getElementById('status');
