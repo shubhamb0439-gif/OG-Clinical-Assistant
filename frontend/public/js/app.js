@@ -592,7 +592,7 @@ function initSocket() {
             const payload = { deviceName: DEVICE_NAME, xrId: XR_ID };
             console.log('[SOCKET] Emitting identify + request_device_list', payload);
             socket.emit('identify', payload);
-            socket.emit('request_device_list');
+            // socket.emit('request_device_list');
 
             console.log('[PAIR] Option B: waiting for server auto-pair (room_joined)');
 
@@ -632,7 +632,7 @@ function initSocket() {
         console.log('[SOCKET] 🔄 Reconnected. attempt=', attempt);
         const payload = { deviceName: DEVICE_NAME, xrId: XR_ID };
         socket.emit('identify', payload);
-        socket.emit('request_device_list');
+        // socket.emit('request_device_list');
 
         // On reconnect, try to re-pair if room was lost
         if (!currentRoom) {
