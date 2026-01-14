@@ -738,11 +738,6 @@ function initSocket() {
             pairedPeerId = other || pairedPeerId || null;
             console.log('[PAIR] pairedPeerId =', pairedPeerId);
 
-            // ✅ Ask server for authoritative room-scoped list
-            try { socket?.emit('request_device_list'); } catch (e) {
-                console.warn('[DEVICES] request_device_list failed:', e);
-            }
-
         } catch (e) {
             console.warn('[PAIR] failed to derive pairedPeerId:', e);
             pairedPeerId = null;
