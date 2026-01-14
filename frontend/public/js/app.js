@@ -243,7 +243,6 @@ function mergeIncremental(prev, next) {
 // 🔷 ROOM: track the private room we're paired into (if any)
 let currentRoom = null;
 let pairedPeerId = null; // set when server emits room_joined
-let roomJoinedTime = 0; // timestamp for grace window after room_joined
 
 
 // 🔒 Sticky autoconnect flag (persist across refresh)
@@ -726,7 +725,6 @@ function initSocket() {
 
         // 1) Authoritative room routing
         currentRoom = roomId;
-        roomJoinedTime = Date.now();
 
         // 2) Determine peer safely
         try {
@@ -737,6 +735,11 @@ function initSocket() {
 
             pairedPeerId = other || pairedPeerId || null;
             console.log('[PAIR] pairedPeerId =', pairedPeerId);
+
+            // ✅ Ask server for authoritative room-scoped list
+            try { socket?.emit('request_device_list'); } catch (e) {
+                console.warn('[DEVICES] request_device_list failed:', e);
+            }
 
         } catch (e) {
             console.warn('[PAIR] failed to derive pairedPeerId:', e);
@@ -1474,13 +1477,6 @@ function updateDeviceList(devices) {
     lastDeviceList = devices;
 
     console.log('[DEVICES] Updating device list with', devices.length, 'devices');
-
-    // Grace window: when paired, ignore transient incomplete device lists immediately after room_joined
-    if (currentRoom && devices.length < 2 && Date.now() - roomJoinedTime < 3000) {
-        console.log('[DEVICES] Ignoring transient incomplete device list post room_joined');
-        return;
-    }
-
     deviceListElement.innerHTML = '';
 
     const myId = XR_ID;
@@ -1960,4 +1956,3 @@ window.addEventListener('load', async () => {
 
 
 console.log('[INIT] Application initialization complete');
-//=====
