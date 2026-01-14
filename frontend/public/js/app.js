@@ -243,7 +243,6 @@ function mergeIncremental(prev, next) {
 // 🔷 ROOM: track the private room we're paired into (if any)
 let currentRoom = null;
 let pairedPeerId = null; // set when server emits room_joined
-let pairingInProgress = false; // flag to ignore device_list during pairing
 
 
 // 🔒 Sticky autoconnect flag (persist across refresh)
@@ -460,6 +459,8 @@ xrIdInput.addEventListener('change', () => {
     announcePresence('idle');
 });
 
+// Track when we last joined a room so we can ignore transient single-device snapshots
+let lastRoomJoinedAt = 0;
 
 // ---------------- Status pill ----------------
 function setStatus(status) {
@@ -666,7 +667,6 @@ function initSocket() {
         currentRoom = null;
         pairedPeerId = null;
         manualDisconnect = false;
-        pairingInProgress = false; // reset pairing flag on disconnect
 
         // ✅ IMPORTANT: clear UI, don’t re-render stale server list while disconnected
         lastDeviceList = [];
@@ -722,19 +722,19 @@ function initSocket() {
         addSystemMessage(`Pair error: ${message}`);
     });
 
-    socket.on('room_joined', ({ roomId, members }) => {
-        console.log('[PAIR] room_joined:', roomId, members);
-
-        pairingInProgress = false; // stop ignoring device_list
+    socket.on('room_joined', (room) => {
+        console.log('[PAIR] room_joined:', room);
 
         // 1) Authoritative room routing
-        currentRoom = roomId;
+        currentRoom = room;
+        lastRoomJoinedAt = Date.now();
+        console.log('[PAIR] lastRoomJoinedAt:', lastRoomJoinedAt);
 
         // 2) Determine peer safely
         try {
             const me = normalizeId(XR_ID);
-            const other = Array.isArray(members)
-                ? members.map(normalizeId).find(m => m && m !== me)
+            const other = Array.isArray(room.members)
+                ? room.members.map(normalizeId).find(m => m && m !== me)
                 : null;
 
             pairedPeerId = other || pairedPeerId || null;
@@ -751,7 +751,7 @@ function initSocket() {
         }
 
         // 3) Safe message
-        const memList = Array.isArray(members) ? members.join(', ') : '';
+        const memList = Array.isArray(room.members) ? room.members.join(', ') : '';
         addSystemMessage(`🎯 VR Room created: ${roomId}.${memList ? ` Members: ${memList}` : ''}`);
 
         // 4) Clear UI immediately; device_list will repaint shortly
@@ -883,9 +883,6 @@ function toggleConnection() {
         // Re-enable reconnection for active sessions
         if (socket?.io) socket.io.opts.reconnection = true;
 
-        pairingInProgress = true; // start ignoring device_list updates
-        updateDeviceList([]); // clear UI during pairing
-
         setStatus('Connecting');
         try { localStorage.setItem(AUTO_KEY, '1'); } catch { }
         socket.connect();
@@ -908,7 +905,6 @@ window.addEventListener('beforeunload', () => {
         console.warn('[AUTO] beforeunload: failed to persist XR_AUTOCONNECT:', e);
     }
 });
-
 
 // ---------- Persistent BroadcastChannels ----------
 const transcriptBC = new BroadcastChannel('scribe-transcript');
@@ -1476,13 +1472,19 @@ function showClickToPlayOverlay() {
 
 // ---------------- Devices list UI ----------------
 function updateDeviceList(devices) {
-    if (!Array.isArray(devices)) {
-        console.error('Device list is not an array:', devices);
-        return;
+    // Guard: if we're already in a room and a 1-device list arrives
+    // shortly after room_joined, treat it as a transient snapshot and ignore it.
+    const GRACE_WINDOW_MS = 2000; // 1-2s grace window per request
+    if (currentRoom && devices && devices.length === 1) {
+        const sinceJoin = Date.now() - lastRoomJoinedAt;
+        if (lastRoomJoinedAt > 0 && sinceJoin >= 0 && sinceJoin < GRACE_WINDOW_MS) {
+            console.warn('Ignored transient device_list (1 device) arriving within grace window', { sinceJoin, GRACE_WINDOW_MS });
+            return; // keep previous UI state; wait for the correct list
+        }
     }
 
-    if (pairingInProgress) {
-        console.log('[DEVICES] Ignoring device_list update during pairing:', devices.length, 'devices');
+    if (!Array.isArray(devices)) {
+        console.error('Device list is not an array:', devices);
         return;
     }
 
@@ -1940,9 +1942,6 @@ window.addEventListener('load', async () => {
         const chosenId = normalizeId(xrIdInput.value) || ALLOWED_ID;
         XR_ID = chosenId;
         DEVICE_NAME = isAllowedId(XR_ID) ? `Desktop${ALLOWED_ID_NUM}` : 'Desktop';
-
-        pairingInProgress = true; // start ignoring device_list
-        updateDeviceList([]); // clear UI
 
         setStatus('Connecting');
         if (socket?.io) socket.io.opts.reconnection = true;
