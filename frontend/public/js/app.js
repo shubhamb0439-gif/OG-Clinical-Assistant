@@ -805,21 +805,18 @@ function initSocket() {
         // ✅ pairing complete = connected (AFTER room established)
         setStatus('Connected');
 
-        // 4) Request device_list with grace period ONLY if peer confirmed
-        // ✅ OPTIMAL: This ensures both devices are in the room before requesting the list
+        // 4) Request device_list with grace period 
+        // ✅ OPTIMAL: Always request after grace period - server consolidation ensures both devices present
+        // Even if peer not yet extracted, the device_list debounce will validate both before rendering
         // Works for n pairs simultaneously - each pair waits independently
-        if (pairedPeerId) {
-            setTimeout(() => {
-                try {
-                    console.log('[DEVICES] Requesting device list after grace period (peer confirmed in this pair)');
-                    socket?.emit('request_device_list');
-                } catch (e) {
-                    console.warn('[DEVICES] request_device_list failed:', e);
-                }
-            }, 100); // 100ms grace period for this pair's server consolidation
-        } else {
-            console.log('[PAIR] Peer not yet in members; waiting for next room_joined event with peer present');
-        }
+        setTimeout(() => {
+            try {
+                console.log('[DEVICES] Requesting device list after grace period (100ms server consolidation window)');
+                socket?.emit('request_device_list');
+            } catch (e) {
+                console.warn('[DEVICES] request_device_list failed:', e);
+            }
+        }, 100); // 100ms grace period for this pair's server consolidation
 
         // ---- WebRTC flush unchanged ----
         if (pendingLocalAnswer && socket?.connected) {
