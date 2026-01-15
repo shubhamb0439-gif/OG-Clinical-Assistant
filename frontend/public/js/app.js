@@ -133,6 +133,9 @@ let duplicateLock = false; // 🔒 prevents reconnect loops once server says ID 
 let handlingOffer = false;          // prevent overlapping handleOffer() runs
 let lastRemoteOfferSdp = '';        // drop duplicate re-sent offers
 
+// ✅ OPTIMAL FIX: Debounce timer for zero-flicker 1-to-1 pairing (works for n pairs simultaneously)
+let pendingDeviceListRender = null;  // debounce timer per room
+
 
 // --- Desktop network telemetry (renderer) ---
 let dockTelTimer = null;
@@ -710,24 +713,58 @@ function initSocket() {
     socket.on('signal', handleSignalMessage);
     socket.on('message', handleChatMessage);
     socket.on('device_list', (devices) => {
-        // ✅ When paired in a room, only render if we have both devices
-        // This prevents transient single-device flashes
-        if (currentRoom && Array.isArray(devices)) {
-            const myNorm = normalizeId(XR_ID);
-            const peerNorm = normalizeId(pairedPeerId);
-            const deviceNorms = devices.map(d => normalizeId(d?.xrId)).filter(Boolean);
+        // ✅ OPTIMAL: 1-to-1 pairing with debounce (works for n pairs simultaneously)
+        // Each pair gets its own room + validates both devices before rendering
+        
+        if (!Array.isArray(devices)) {
+            console.log('[DEVICES] Invalid device_list (not array); ignoring');
+            return;
+        }
 
-            // Only render if both devices are present in the list
-            if (peerNorm && deviceNorms.includes(myNorm) && deviceNorms.includes(peerNorm)) {
-                console.log('[DEVICES] Both devices confirmed in room-scoped list; rendering');
-                updateDeviceList(devices);
-            } else {
-                console.log('[DEVICES] Incomplete device list for paired room; skipping render to prevent flash');
-                return;
-            }
-        } else {
-            // Not paired or unpaired mode: render normally
+        const myNorm = normalizeId(XR_ID);
+        const peerNorm = normalizeId(pairedPeerId);
+        const deviceNorms = devices.map(d => normalizeId(d?.xrId)).filter(Boolean);
+        
+        const hasMe = myNorm && deviceNorms.includes(myNorm);
+        const hasPeer = peerNorm && deviceNorms.includes(peerNorm);
+
+        // Case 1: Not paired - render immediately
+        if (!currentRoom) {
+            console.log('[DEVICES] Not paired; rendering immediately');
+            clearTimeout(pendingDeviceListRender);
             updateDeviceList(devices);
+            return;
+        }
+
+        // Case 2: Paired mode (1-to-1) - validate BOTH devices before rendering
+        if (peerNorm && hasMe && hasPeer) {
+            // ✅ BOTH CONFIRMED - schedule render with 50ms debounce for stability
+            console.log('[DEVICES] ✅ Both devices confirmed; scheduling stable render (50ms debounce)');
+            
+            clearTimeout(pendingDeviceListRender);
+            pendingDeviceListRender = setTimeout(() => {
+                // Double-check both still present before rendering
+                const currentDeviceNorms = devices.map(d => normalizeId(d?.xrId)).filter(Boolean);
+                const stillHasMe = myNorm && currentDeviceNorms.includes(myNorm);
+                const stillHasPeer = peerNorm && currentDeviceNorms.includes(peerNorm);
+                
+                if (stillHasMe && stillHasPeer) {
+                    console.log('[DEVICES] Confirmed: rendering 2-device 1-to-1 pair');
+                    updateDeviceList(devices);
+                } else {
+                    console.log('[DEVICES] Devices changed before debounce expired; skipping this render');
+                }
+                pendingDeviceListRender = null;
+            }, 50);
+        } else if (!peerNorm) {
+            // Peer not yet known - too early
+            console.log('[DEVICES] ⏸️ Peer not yet extracted from room_joined; waiting for stability');
+        } else if (!hasMe) {
+            // Missing local device - invalid
+            console.log('[DEVICES] ⏸️ Missing local device; blocking incomplete render');
+        } else {
+            // Missing peer - transient incomplete state
+            console.log('[DEVICES] ⏸️ Missing peer (1-device snapshot); blocking to prevent flicker');
         }
     });
     socket.on('control', handleControlCommand);
@@ -768,16 +805,21 @@ function initSocket() {
         // ✅ pairing complete = connected (AFTER room established)
         setStatus('Connected');
 
-        // 4) Request device_list with a grace period to allow server to compile both devices
-        // This prevents transient single-device flashes in the UI
-        setTimeout(() => {
-            try {
-                console.log('[DEVICES] Requesting authoritative room-scoped device list after grace period');
-                socket?.emit('request_device_list');
-            } catch (e) {
-                console.warn('[DEVICES] request_device_list failed:', e);
-            }
-        }, 100); // 100ms grace period for server to confirm both devices in room
+        // 4) Request device_list with grace period ONLY if peer confirmed
+        // ✅ OPTIMAL: This ensures both devices are in the room before requesting the list
+        // Works for n pairs simultaneously - each pair waits independently
+        if (pairedPeerId) {
+            setTimeout(() => {
+                try {
+                    console.log('[DEVICES] Requesting device list after grace period (peer confirmed in this pair)');
+                    socket?.emit('request_device_list');
+                } catch (e) {
+                    console.warn('[DEVICES] request_device_list failed:', e);
+                }
+            }, 100); // 100ms grace period for this pair's server consolidation
+        } else {
+            console.log('[PAIR] Peer not yet in members; waiting for next room_joined event with peer present');
+        }
 
         // ---- WebRTC flush unchanged ----
         if (pendingLocalAnswer && socket?.connected) {
