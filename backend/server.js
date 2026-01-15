@@ -141,6 +141,11 @@ const io = new Server(server, {
 console.log('[SOCKET.IO] Socket.IO server initialized');
 
 /* =========================================================
+   ROOM OCCUPANCY TRACKING - for roomReady pattern
+   ========================================================= */
+const PAIR_SIZE = 2;  // Each 1-to-1 pair requires exactly 2 devices
+
+/* =========================================================
    DEBUG HELPER (TEMP – SAFE)
    ========================================================= */
 function dbgToSocket(socket, msg, extra = {}) {
@@ -785,13 +790,21 @@ async function tryDbAutoPair(deviceId, debugSocket = null) {
   const members = listRoomMembers(roomId);
   io.to(roomId).emit("room_joined", { roomId, members });
 
-  await broadcastDeviceList(roomId);
+  // ✅ OPTIMAL: Emit roomReady ONLY when both devices confirmed present
+  // This replaces timing-dependent grace period with server-guaranteed confirmation
+  if (members.length === PAIR_SIZE) {
+    console.log('[PAIR_READY] Both devices confirmed; emitting roomReady', { roomId, members, count: members.length });
+    io.to(roomId).emit("roomReady", { 
+      roomId, 
+      members,
+      message: 'Both devices confirmed - room ready for pairing'
+    });
+  } else {
+    console.log('[PAIR_READY] Incomplete room members; roomReady NOT emitted yet', { roomId, members, count: members.length, expected: PAIR_SIZE });
+  }
 
-  // ✅ Stabilizer: Redis adapter room propagation can be briefly behind.
-  // Broadcast once more shortly after so the list becomes consistent.
-  setTimeout(() => {
-    try { broadcastDeviceList(roomId); } catch { }
-  }, 250);
+  // ✅ CRITICAL: Broadcast device list IMMEDIATELY when both devices connect (NO DELAY)
+  await broadcastDeviceList(roomId);
 
   broadcastPairs();
 
@@ -4125,10 +4138,28 @@ io.on('connection', (socket) => {
     try {
       if (!socket.data?.roomId) {
         dbgToSocket(socket, "[IDENTIFY] calling tryDbAutoPair", { XR, socketId: socket.id });
-        await tryDbAutoPair(XR, socket); // ✅ pass socket so debug goes to browser
+        const pairedSuccessfully = await tryDbAutoPair(XR, socket); // ✅ pass socket so debug goes to browser
+        
+        // ✅ If pairing succeeded, immediately broadcast device list to the room (NO DELAY)
+        if (pairedSuccessfully && socket.data?.roomId) {
+          try {
+            dlog('[IDENTIFY] Device connected and paired; broadcasting device list immediately', socket.data.roomId);
+            await broadcastDeviceList(socket.data.roomId);
+          } catch (e) {
+            dwarn('[IDENTIFY] broadcastDeviceList failed:', e?.message || e);
+          }
+        }
       } else {
         dbgToSocket(socket, "[IDENTIFY] skipping tryDbAutoPair; already in room", { roomId: socket.data.roomId });
         dlog('[IDENTIFY] Skipping tryDbAutoPair; already in room', socket.data.roomId);
+        
+        // ✅ If already in a room, broadcast device list immediately to reflect new device
+        try {
+          dlog('[IDENTIFY] Device already in room; broadcasting device list immediately', socket.data.roomId);
+          await broadcastDeviceList(socket.data.roomId);
+        } catch (e) {
+          dwarn('[IDENTIFY] broadcastDeviceList failed:', e?.message || e);
+        }
       }
 
     } catch (e) {
