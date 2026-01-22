@@ -135,12 +135,19 @@ if (!soapHost) {
 // ==========================
 const PLACEHOLDER_ID = 'scribe-transcript-placeholder';
 const MAX_TRANSCRIPT_LINES = 300;
+function roomLS(base) {
+  // room-scoped keys; fallback keeps behavior before pairing
+  const r = currentRoom || '__noroom__';
+  return `scribe:${r}:${base}`;
+}
+
 const LS_KEYS = {
-  HISTORY: 'scribe.history',
-  LATEST_SOAP: 'scribe.latestSoap',
-  ACTIVE_ITEM_ID: 'scribe.activeItem',
-  MED_AVAIL: 'scribe.medAvailability',              // { byName: {<key>: boolean}, lastText: "<normalized-lines>" }
+  HISTORY: () => roomLS('history'),
+  LATEST_SOAP: () => roomLS('latestSoap'),
+  ACTIVE_ITEM_ID: () => roomLS('activeItem'),
+  MED_AVAIL: () => roomLS('medAvailability'),
 };
+
 
 const NGROK_URL = 'http://localhost:8080';
 const AZURE_URL = 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
@@ -195,23 +202,28 @@ function lsSafeParse(key, fallback) {
   try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
   catch { return fallback; }
 }
-function saveHistory(arr) { localStorage.setItem(LS_KEYS.HISTORY, JSON.stringify(arr || [])); }
-function loadHistory() { return lsSafeParse(LS_KEYS.HISTORY, []); }
-function saveLatestSoap(soap) { localStorage.setItem(LS_KEYS.LATEST_SOAP, JSON.stringify(soap || {})); }
-function loadLatestSoap() { return lsSafeParse(LS_KEYS.LATEST_SOAP, {}); }
-function saveActiveItemId(id) { localStorage.setItem(LS_KEYS.ACTIVE_ITEM_ID, id || ''); }
-function loadActiveItemId() { return localStorage.getItem(LS_KEYS.ACTIVE_ITEM_ID) || ''; }
+function saveHistory(arr) { localStorage.setItem(LS_KEYS.HISTORY(), JSON.stringify(arr || [])); }
+function loadHistory() { return lsSafeParse(LS_KEYS.HISTORY(), []); }
+
+function saveLatestSoap(soap) { localStorage.setItem(LS_KEYS.LATEST_SOAP(), JSON.stringify(soap || {})); }
+function loadLatestSoap() { return lsSafeParse(LS_KEYS.LATEST_SOAP(), {}); }
+
+function saveActiveItemId(id) { localStorage.setItem(LS_KEYS.ACTIVE_ITEM_ID(), id || ''); }
+function loadActiveItemId() { return localStorage.getItem(LS_KEYS.ACTIVE_ITEM_ID()) || ''; }
+
 function uid() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
 
 // Medication availability persistence
 function saveMedStatus(byName, lastText) {
   const payload = { byName: byName || {}, lastText: lastText || '' };
-  localStorage.setItem(LS_KEYS.MED_AVAIL, JSON.stringify(payload));
+  localStorage.setItem(LS_KEYS.MED_AVAIL(), JSON.stringify(payload));
 }
 function loadMedStatus() {
-  const { byName = {}, lastText = '' } = lsSafeParse(LS_KEYS.MED_AVAIL, { byName: {}, lastText: '' }) || {};
+  const { byName = {}, lastText = '' } =
+    lsSafeParse(LS_KEYS.MED_AVAIL(), { byName: {}, lastText: '' }) || {};
   return { byName, lastText };
 }
+
 
 // ==========================
 // Status pill
@@ -1341,42 +1353,42 @@ function connectTo(endpointBase, onFailover) {
       // ✅ If/when server joins cockpit to pair room, re-request list to mirror XR Vision Dock
       socket.on('room_joined', ({ roomId, reason, members } = {}) => {
         const prevRoom = currentRoom;
-        currentRoom = roomId || null;
+        const nextRoom = roomId || null;
 
-        // ✅ MANDATORY: if room changed, wipe transcript UI + state to prevent cross-room bleed
-        if (prevRoom && currentRoom && prevRoom !== currentRoom) {
-          console.warn('[COCKPIT][ROOM] room changed → clearing transcript + state', { prevRoom, currentRoom });
-
-          // clear incremental transcript merge state + timers
-          Object.values(transcriptState.byKey || {}).forEach(slot => {
-            try { if (slot?.flushTimer) clearTimeout(slot.flushTimer); } catch { }
-          });
-          transcriptState.byKey = {};
-
-          // clear transcript UI + persisted history (prevents showing old pair’s transcripts)
-          try { transcriptEl.innerHTML = ''; } catch { }
-          try { ensureTranscriptPlaceholder(); } catch { }
-          try { saveHistory([]); } catch { }
-          try { saveActiveItemId(''); } catch { }
-
-          // clear SOAP baseline so UI doesn’t show old pair’s SOAP
-          try { latestSoapNote = {}; saveLatestSoap({}); } catch { }
-          try { if (!soapGenerating) renderSoapBlank(); } catch { }
-        }
-
-
-        console.log('[COCKPIT][ROOM] room_joined', {
-          roomId,
+        console.log('[COCKPIT][ROOM] room_joined (raw)', {
+          prevRoom,
+          nextRoom,
           reason,
           members,
           socketId: socket.id,
           cockpitForXrId: COCKPIT_FOR_XR_ID
         });
 
+        // ✅ Always clear if switching rooms (including first join null -> room)
+        clearCockpitUiForRoomSwitch(prevRoom, nextRoom);
+
+        // ✅ Set currentRoom BEFORE restore (restore reads currentRoom via loadHistory()/etc)
+        currentRoom = nextRoom;
+
         updateConnectionStatus('room_joined');
 
-        // Immediately request authoritative list (room-scoped if paired)
-        try { socket.emit('request_device_list'); } catch (e) {
+        // ✅ Restore ONLY this room’s state (or blank if none)
+        try {
+          restoreFromLocalStorage();
+          console.debug('[COCKPIT][RESTORE] after room_joined', {
+            currentRoom,
+            historyCount: (loadHistory() || []).length,
+            activeId: loadActiveItemId()
+          });
+        } catch (e) {
+          console.warn('[COCKPIT][RESTORE] failed after room_joined', e);
+        }
+
+        // ✅ Immediately request authoritative list (room-scoped if paired)
+        try {
+          socket.emit('request_device_list');
+          console.debug('[COCKPIT][REQ_LIST] sent after room_joined', { currentRoom });
+        } catch (e) {
           console.warn('[COCKPIT][REQ_LIST] failed after room_joined', e);
         }
       });
@@ -1418,6 +1430,42 @@ function connectTo(endpointBase, onFailover) {
     });
 
   });
+}
+
+function clearCockpitUiForRoomSwitch(prevRoom, nextRoom) {
+  if (prevRoom === nextRoom) return;
+
+  console.warn('[COCKPIT][ROOM][CLEAR] switching rooms', {
+    prevRoom, nextRoom,
+    prevHistoryKey: prevRoom ? `scribe:${prevRoom}:history` : null,
+    nextHistoryKey: nextRoom ? `scribe:${nextRoom}:history` : null,
+    prevSoapKey: prevRoom ? `scribe:${prevRoom}:latestSoap` : null,
+    nextSoapKey: nextRoom ? `scribe:${nextRoom}:latestSoap` : null
+
+  });
+
+  // 1) stop any pending transcript flush timers (prevents late append from old room)
+  try {
+    Object.values(transcriptState.byKey || {}).forEach(slot => {
+      try { if (slot?.flushTimer) clearTimeout(slot.flushTimer); } catch { }
+    });
+  } catch { }
+  transcriptState.byKey = {};
+
+  // 2) wipe transcript DOM
+  try { transcriptEl.innerHTML = ''; } catch { }
+  try { ensureTranscriptPlaceholder(); } catch { }
+
+  // 3) wipe in-memory SOAP/transcript selection (do NOT delete room storage)
+  currentActiveItemId = null;
+  latestSoapNote = {};
+  soapGenerating = false;
+
+  // 4) clear SOAP UI to blank immediately (room isolation)
+  try { renderSoapBlank(); } catch { }
+
+  // 5) clear med in-memory; restore() will rehydrate from the correct room if applicable
+  try { medAvailability.clear(); } catch { }
 }
 
 
