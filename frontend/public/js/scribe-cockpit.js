@@ -247,6 +247,39 @@ let currentRoom = null; // cockpit view-only room, set from room_joined
 
 let COCKPIT_FOR_XR_ID = null; // client-known xrId (from /api/platform/me)
 
+// --- cockpit request_device_list throttling (prevents server log "shake") ---
+let _reqListTimer = null;
+let _lastReqListAt = 0;
+
+function requestDeviceListThrottled(why) {
+  const now = Date.now();
+
+  // If we’re not in a room yet, throttle harder (pairing phase)
+  const minGapMs = currentRoom ? 250 : 1200;
+
+  if (now - _lastReqListAt < minGapMs) {
+    console.debug('[COCKPIT][REQ_LIST] throttled', { why, currentRoom, sinceMs: now - _lastReqListAt });
+    return;
+  }
+
+  if (_reqListTimer) return;
+  _reqListTimer = setTimeout(() => {
+    _reqListTimer = null;
+    _lastReqListAt = Date.now();
+
+    if (!socket?.connected) return;
+    try {
+      socket.emit('request_device_list');
+      console.debug('[COCKPIT][REQ_LIST] sent', { why, currentRoom, socketId: socket.id });
+    } catch (e) {
+      console.warn('[COCKPIT][REQ_LIST] emit failed', { why, e });
+    }
+  }, 50);
+}
+
+
+let _lastDeviceListSig = null;
+
 
 function updateConnectionStatus(src = '') {
   const connected = !!(socket && socket.connected);
@@ -1384,13 +1417,13 @@ function connectTo(endpointBase, onFailover) {
           console.warn('[COCKPIT][RESTORE] failed after room_joined', e);
         }
 
-        // ✅ Immediately request authoritative list (room-scoped if paired)
-        try {
-          socket.emit('request_device_list');
-          console.debug('[COCKPIT][REQ_LIST] sent after room_joined', { currentRoom });
-        } catch (e) {
-          console.warn('[COCKPIT][REQ_LIST] failed after room_joined', e);
+        // ✅ Request device list ONLY when we actually have a room, and throttle to prevent spam
+        if (currentRoom) {
+          requestDeviceListThrottled('after_room_joined');
+        } else {
+          console.debug('[COCKPIT][REQ_LIST] skip after room_joined (not paired yet)', { reason, prevRoom, nextRoom });
         }
+
       });
 
 
@@ -1415,8 +1448,9 @@ function connectTo(endpointBase, onFailover) {
         console.warn('[SCRIBE] Failed to load /api/platform/me for identify:', e);
       }
 
-      // ✅ Always request once after identify (server will reply [] or room list)
-      try { socket.emit('request_device_list'); } catch { }
+      // ✅ Always request once after identify (server will reply [] if not paired yet, or room list if paired)
+      requestDeviceListThrottled('after_identify');
+
 
       resolve();
     });
@@ -1425,6 +1459,7 @@ function connectTo(endpointBase, onFailover) {
     socket.on('disconnect', (reason) => {
       console.warn('[COCKPIT] disconnect', { reason, socketId: socket?.id, currentRoom });
       currentRoom = null;
+      _lastReqListAt = 0;   // ✅ reset throttle so next connect can request immediately
       showNoDevices();
       updateConnectionStatus('disconnect');
     });
