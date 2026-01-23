@@ -1,4 +1,4 @@
-// -------------------------------------------------- scribe-cockpit.js --------------------------------------------------
+// -------------------------------------------------- scribe-cockpit.js ----------------------------------------------------
 // Scribe cockpit with precise, persistent per-textbox edit tracking vs AI baseline,
 // and device-based status pill logic.
 //
