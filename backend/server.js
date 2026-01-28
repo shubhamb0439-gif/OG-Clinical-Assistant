@@ -22,7 +22,7 @@ const { Sequelize } = require('sequelize');
 const bcrypt = require('bcryptjs');
 const session = require('express-session');
 const nodemailer = require('nodemailer');
-
+const { userInfo } = require('os');
 const { sequelize, connectToDatabase, closeDatabase } = require('./database/database-config');
 const { getAzureSqlConnection } = require('./database/azure-db-helper');
 
@@ -208,6 +208,7 @@ if (IS_PROD && process.env.REDIS_URL) {
 
 // -------------------- Middleware --------------------
 app.use(cors());
+app.use(express.json({ limit: '5mb' }));
 app.use(express.json());
 console.log('[MIDDLEWARE] CORS + JSON enabled');
 
@@ -1435,6 +1436,356 @@ app.post('/api/medications/availability', async (req, res) => {
   }
 });
 
+// -------------------- Routes --------------------
+// NOTE: make sure this exists somewhere near the top of server.js
+// app.use(express.json());
+
+/**
+ * 1) GET /api/templates
+ *    Used by UI dropdown to list templates
+ */
+app.get("/api/templates", async (_req, res) => {
+  try {
+    const templates = await sequelize.query(
+      `
+      SELECT id, template AS name, short_name
+      FROM [dbo].[Templates]
+      WHERE row_status = 1
+      ORDER BY template ASC;
+      `,
+      { type: Sequelize.QueryTypes.SELECT }
+    );
+
+    return res.json({ templates });
+  } catch (err) {
+    derr("[TEMPLATES_API] /api/templates failed:", err?.message || err);
+    return res.status(500).json({ error: "Failed to load templates" });
+  }
+});
+/**
+ * 2) POST /api/notes/generate
+ *    UI calls this when template dropdown changes to regenerate note
+ *    Body: { transcript: string, templateId?: number | "default" }
+ */
+app.post("/api/notes/generate", async (req, res) => {
+  try {
+    const transcript = String(req.body?.transcript || "").trim();
+    const templateId = req.body?.templateId; // number OR "default" OR null
+
+    if (!transcript) {
+      return res.status(400).json({ error: "transcript is required" });
+    }
+
+    const note = await generateSoapNote(transcript, templateId);
+    return res.json({ note });
+  } catch (err) {
+    derr("[NOTES_API] /api/notes/generate failed:", err?.message || err);
+    return res.status(500).json({ error: "Failed to generate note" });
+  }
+});
+app.get('/ehr/patient/:mrn', async (req, res) => {
+  dlog('[EHR_API] /ehr/patient/:mrn request received');
+
+  try {
+    const mrn = (req.params.mrn || '').trim();
+    if (!mrn) {
+      return res.status(400).json({ error: 'MRN parameter is required' });
+    }
+
+    const sqlText = `
+      SELECT
+          su.id               AS patient_id,
+          su.full_name        AS full_name,
+          su.email            AS email,
+          su.mrn_no           AS mrn_no,
+
+          pn.id               AS note_id,
+          pn.created_date     AS document_created_date,
+
+          MAX(vpn.template)   AS template,
+          MAX(vpn.short_name) AS short_name
+
+      FROM [dbo].[System_Users] su
+      LEFT JOIN [dbo].[Patient_Notes] pn
+        ON pn.patient_id = su.id
+      LEFT JOIN [dbo].[View_Patient_Note_Content] vpn
+        ON vpn.patient_note_id = pn.id
+
+      WHERE su.mrn_no = :mrn
+
+      GROUP BY
+          su.id,
+          su.full_name,
+          su.email,
+          su.mrn_no,
+          pn.id,
+          pn.created_date
+
+      ORDER BY pn.created_date DESC;
+    `;
+
+    const rows = await sequelize.query(sqlText, {
+      replacements: { mrn },
+      type: Sequelize.QueryTypes.SELECT
+    });
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Patient not found', mrn });
+    }
+
+    const patient = {
+      patient_id: rows[0].patient_id,
+      full_name: rows[0].full_name,
+      email: rows[0].email,
+      mrn_no: rows[0].mrn_no
+    };
+
+    const notes = rows
+      .filter(r => r.note_id !== null)
+      .map(r => ({
+        note_id: r.note_id,
+        short_name: r.short_name ?? null,
+        template: r.template ?? null,
+        document_created_date: r.document_created_date
+      }));
+
+    return res.json({ success: true, patient, notes });
+
+  } catch (err) {
+    derr('[EHR_API] Error:', err);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: err.message
+    });
+  }
+});
+
+app.get('/ehr/notes/:noteId', async (req, res) => {
+  dlog('[EHR_API] /ehr/notes/:noteId request received');
+
+  try {
+    const noteId = parseInt(req.params.noteId, 10);
+    if (!Number.isFinite(noteId)) {
+      return res.status(400).json({ error: 'noteId must be a number' });
+    }
+
+    const sqlText = `
+      SELECT
+        pn.id AS patient_note_id,
+        pn.created_date AS document_created_date,
+        vpn.template,
+        vpn.short_name,
+        vpn.position,
+        vpn.component,
+        vpn.text
+      FROM [dbo].[Patient_Notes] pn
+      LEFT JOIN [dbo].[View_Patient_Note_Content] vpn
+        ON vpn.patient_note_id = pn.id
+      WHERE pn.id = :noteId
+      ORDER BY vpn.position ASC;
+    `;
+
+    const rows = await sequelize.query(sqlText, {
+      replacements: { noteId },
+      type: Sequelize.QueryTypes.SELECT
+    });
+
+    if (!rows.length) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+
+    const meta = {
+      patient_note_id: noteId,
+      template: rows[0].template ?? null,
+      short_name: rows[0].short_name ?? null,
+      document_created_date: rows[0].document_created_date
+    };
+
+    const sections = rows
+      .map(r => ({
+        position: Number(r.position ?? 0),
+        component: String(r.component ?? '').trim(),
+        text: String(r.text ?? '').trim()
+      }))
+      .filter(s => s.component || s.text);
+
+    return res.json({
+      success: true,
+      note: meta,
+      sections
+    });
+
+  } catch (err) {
+    derr('[EHR_API] Error:', err);
+    return res.status(500).json({
+      error: 'Internal server error',
+      message: err.message
+    });
+  }
+});
+
+
+app.post('/ehr/ai/summary', async (req, res) => {
+  try {
+    const mrn = String(req.body?.mrn || '').trim();
+    if (!mrn) {
+      return res.status(400).json({ error: 'mrn is required' });
+    }
+
+    const summary = await generateSummaryForMrn(mrn);
+    return res.json(summary);
+
+  } catch (err) {
+    console.error('Summary Error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+async function generateSummaryForMrn(mrn) {
+  if (!mrn) {
+    throw new Error('MRN is required');
+  }
+
+  const ABACUS_API_KEY = process.env.ABACUS_API_KEY;
+  if (!ABACUS_API_KEY) {
+    throw new Error('Missing ABACUS_API_KEY');
+  }
+
+  // 1️ Find patient
+  const patientRows = await sequelize.query(
+    `SELECT id AS patient_id
+     FROM [dbo].[System_Users]
+     WHERE mrn_no = :mrn`,
+    {
+      replacements: { mrn },
+      type: Sequelize.QueryTypes.SELECT
+    }
+  );
+
+  if (!patientRows.length) {
+    return buildEmptySummary();
+  }
+
+  const patientId = patientRows[0].patient_id;
+
+  // 2️ Fetch ALL notes with content
+  const rows = await sequelize.query(
+    `SELECT
+        pn.id AS note_id,
+        pn.created_date,
+        v.position,
+        v.component,
+        v.text
+     FROM [dbo].[Patient_Notes] pn
+     LEFT JOIN [dbo].[View_Patient_Note_Content] v
+       ON v.patient_note_id = pn.id
+     WHERE pn.patient_id = :patientId
+     ORDER BY pn.created_date DESC, pn.id DESC, v.position ASC`,
+    {
+      replacements: { patientId },
+      type: Sequelize.QueryTypes.SELECT
+    }
+  );
+
+  if (!rows.length) {
+    return buildEmptySummary();
+  }
+
+  // 3️ Group content by visit (note)
+  const visits = new Map();
+
+  for (const r of rows) {
+    if (!visits.has(r.note_id)) {
+      visits.set(r.note_id, []);
+    }
+
+    if (r.component || r.text) {
+      visits.get(r.note_id).push(
+        `${r.component || 'Section'}: ${r.text || 'N/A'}`
+      );
+    }
+  }
+
+  // 4️ Build visits text (LATEST FIRST)
+  const visitsText = [...visits.entries()]
+    .map(([noteId, lines], index) => {
+      return `VISIT ${index + 1}\n${lines.join('\n')}`;
+    })
+    .join('\n\n');
+
+  // 5️ STANDARD + OPTIMAL PROMPT
+  const prompt = `
+You are generating a clinical summary note.
+
+Use ONLY the information provided in the visits below.
+The visits belong to the same patient.
+Each visit represents a different encounter.
+
+Rules:
+- Do NOT invent or assume information.
+- Do NOT add medical interpretation beyond what is written.
+- Combine repeated information into a concise summary.
+- If information conflicts, prefer the most recent visit.
+- If information is missing across all visits, write "N/A".
+- Use professional clinical language.
+- Output MUST be valid JSON only. No markdown. No extra text.
+
+Required Output Schema:
+{
+  "template_title": "AI Summary Note",
+  "sections": [
+    { "component": "Chief Complaint", "text": "..." },
+    { "component": "HPI", "text": "..." },
+    { "component": "ROS", "text": "..." },
+    { "component": "Physical Exam", "text": "..." },
+    { "component": "Assessment", "text": "..." },
+    { "component": "Plan", "text": "..." },
+    { "component": "Medications", "text": "..." },
+    { "component": "Follow Up", "text": "..." }
+  ]
+}
+
+Visits (latest first):
+${visitsText}
+`.trim();
+
+  // 6️⃣ Single AI call
+  const aiResponse = await axios.post(
+    'https://routellm.abacus.ai/v1/chat/completions',
+    {
+      model: 'gpt-4o',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0
+    },
+    {
+      headers: { Authorization: `Bearer ${ABACUS_API_KEY}` },
+      timeout: 60000
+    }
+  );
+
+  const raw = aiResponse?.data?.choices?.[0]?.message?.content;
+  if (!raw) {
+    throw new Error('Empty AI response');
+  }
+
+  return JSON.parse(raw);
+}
+
+function buildEmptySummary() {
+  return {
+    template_title: 'AI Summary Note',
+    sections: [
+      { component: 'Chief Complaint', text: 'N/A' },
+      { component: 'HPI', text: 'N/A' },
+      { component: 'ROS', text: 'N/A' },
+      { component: 'Physical Exam', text: 'N/A' },
+      { component: 'Assessment', text: 'N/A' },
+      { component: 'Plan', text: 'N/A' },
+      { component: 'Medications', text: 'N/A' },
+      { component: 'Follow Up', text: 'N/A' }
+    ]
+  };
+}
 
 // -------------------- Login check middleware --------------------
 function requireLogin(req, res, next) {
@@ -3824,50 +4175,119 @@ function normalizeMedicationList(raw) {
     .filter(s => s.length > 0);
 }
 
-async function generateSoapNote(transcript) {
+// -------------------- SOAP Note Generator --------------------
+async function generateSoapNote(transcript, templateId = null) {
   try {
-    const prompt = `
-Based on the provided transcript, generate a structured SOAP note.
-Sections (always in this order):
-- Chief Complaints
-- History of Present Illness
-- Subjective
-- Objective
-- Assessment
-- Plan
-- Medication
- 
-Rules:
-- Each section should be an array of strings OR "No data available".
-- If info missing, explicitly write "No data available".
-- JSON only, no extra commentary.
- 
-Transcript:
-${transcript.trim()}
-    `.trim();
+    const text = String(transcript || "").trim();
+    if (!text) throw new Error("Empty transcript");
 
-    // ---------- ENV ----------
-    const ABACUS_API_KEY = process.env.ABACUS_API_KEY;
-    const ABACUS_MODEL = (process.env.ABACUS_MODEL || "gpt-4o").trim();
-    const ABACUS_TEMPERATURE = Number(process.env.ABACUS_TEMPERATURE || 0.2);
+    // inline templateId normalization (no helper function)
+    const tplId = (() => {
+      if (templateId === null || templateId === undefined) return null;
+      if (templateId === "default") return null;
+      const n = Number(templateId);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    })();
 
-    if (!ABACUS_API_KEY) {
-      throw new Error("Missing ABACUS_API_KEY in environment");
+    // 1) Decide section list (default vs DB template)
+    const defaultSections = [
+      "Chief Complaints",
+      "History of Present Illness",
+      "Subjective",
+      "Objective",
+      "Assessment",
+      "Plan",
+      "Medication",
+    ];
+
+    let sections = defaultSections;
+    let templateMeta = null;
+
+    if (tplId) {
+      // Template meta
+      const templateRows = await sequelize.query(
+        `
+        SELECT TOP 1 id, template AS name, short_name
+        FROM [dbo].[Templates]
+        WHERE id = :templateId AND row_status = 1;
+        `,
+        { replacements: { templateId: tplId }, type: Sequelize.QueryTypes.SELECT }
+      );
+
+      // Ordered components by position
+      const components = await sequelize.query(
+        `
+        SELECT c.component AS name, m.position
+        FROM [dbo].[Template_Component_Mapping] m
+        JOIN [dbo].[Components] c ON c.id = m.component_id
+        WHERE m.template_id = :templateId
+          AND m.row_status = 1
+          AND c.row_status = 1
+        ORDER BY m.position ASC;
+        `,
+        { replacements: { templateId: tplId }, type: Sequelize.QueryTypes.SELECT }
+      );
+
+      // Use template only if valid + has components, else fallback to default
+      if (templateRows.length && components.length) {
+        const seen = new Set();
+        const dbSections = components
+          .map(x => String(x.name || "").trim())
+          .filter(Boolean)
+          .filter(s => (seen.has(s) ? false : (seen.add(s), true)));
+
+        if (dbSections.length) {
+          sections = dbSections;
+          templateMeta = {
+            templateId: templateRows[0].id,
+            templateName: templateRows[0].name,
+            short_name: templateRows[0].short_name || null,
+            components: components.map(c => ({
+              name: c.name,
+              position: Number(c.position ?? 0),
+            })),
+          };
+        }
+      }
     }
 
-    // ---------- ROUTELLM CHAT COMPLETION ----------
+    // 2) Standard strict prompt (no hallucination)
+    const sectionListText = sections.map(s => `- ${s}`).join("\n");
+
+    const prompt = `
+You are a clinical documentation assistant.
+
+CRITICAL SAFETY / ACCURACY RULES (must follow):
+1) Use ONLY information explicitly present in the transcript. Do NOT assume, infer, or add details.
+2) If something is not clearly stated, write "Not mentioned in transcript" (do not guess).
+3) Preserve negations and uncertainty exactly (e.g., "denies chest pain", "possibly", "unclear").
+4) Do not invent vitals, exam findings, diagnoses, medications, dosages, allergies, PMH/PSH/FH/SH, lab/imaging results, or timelines.
+5) If the transcript is contradictory, include both statements and mark as "Conflicting in transcript".
+6) If a medication name is mentioned without dose/frequency/route, do NOT add them; record only what is said.
+
+OUTPUT FORMAT (strict):
+- Return ONLY valid JSON. No markdown. No commentary.
+- Keys MUST exactly match the section names provided below (same spelling/casing).
+- Each section value MUST be an array of strings OR the exact string "Not mentioned in transcript".
+
+SECTION NAMES (in order):
+${sectionListText}
+
+TRANSCRIPT (raw):
+${text}
+    `.trim();
+
+    // 3) Abacus RouteLLM call
+    const ABACUS_API_KEY = process.env.ABACUS_API_KEY;
+    if (!ABACUS_API_KEY) throw new Error("Missing ABACUS_API_KEY");
+
     const response = await axios.post(
       "https://routellm.abacus.ai/v1/chat/completions",
       {
-        model: ABACUS_MODEL,
-        messages: [
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
-        temperature: ABACUS_TEMPERATURE,
-        stream: false, // IMPORTANT: keep false for JSON
+        model: (process.env.ABACUS_MODEL || "gpt-4o").trim(),
+        messages: [{ role: "user", content: prompt }],
+        temperature: Number(process.env.ABACUS_TEMPERATURE || 0.1),
+        stream: false,
       },
       {
         headers: {
@@ -3878,53 +4298,40 @@ ${transcript.trim()}
       }
     );
 
-    const rawContent =
-      response?.data?.choices?.[0]?.message?.content || "";
-
-    if (!rawContent) {
-      throw new Error("Empty response from RouteLLM");
-    }
-
-    // ---------- CLEAN & PARSE JSON ----------
-    const soapNoteContent = rawContent
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/\s*```$/i, "");
+    // 4) Parse JSON safely
+    let raw = response?.data?.choices?.[0]?.message?.content || "{}";
+    raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
 
     let parsed;
     try {
-      parsed = JSON.parse(soapNoteContent);
+      parsed = JSON.parse(raw);
     } catch (e) {
-      const first = soapNoteContent.indexOf("{");
-      const last = soapNoteContent.lastIndexOf("}");
-      if (first !== -1 && last !== -1) {
-        parsed = JSON.parse(soapNoteContent.slice(first, last + 1));
+      const first = raw.indexOf("{");
+      const last = raw.lastIndexOf("}");
+      if (first !== -1 && last !== -1) parsed = JSON.parse(raw.slice(first, last + 1));
+      else throw e;
+    }
+
+    // 5) Normalize: ensure all sections exist
+    const note = {};
+    for (const s of sections) {
+      const v = parsed?.[s];
+
+      if (Array.isArray(v)) {
+        const arr = v.map(x => String(x)).filter(Boolean);
+        note[s] = arr.length ? arr : "Not mentioned in transcript";
+      } else if (typeof v === "string" && v.trim()) {
+        note[s] = v.trim() === "Not mentioned in transcript" ? "Not mentioned in transcript" : [v.trim()];
       } else {
-        throw e;
+        note[s] = "Not mentioned in transcript";
       }
     }
 
-    return {
-      "Chief Complaints": parsed["Chief Complaints"] || ["No data available"],
-      "History of Present Illness":
-        parsed["History of Present Illness"] || ["No data available"],
-      "Subjective": parsed["Subjective"] || ["No data available"],
-      "Objective": parsed["Objective"] || ["No data available"],
-      "Assessment": parsed["Assessment"] || ["No data available"],
-      "Plan": parsed["Plan"] || ["No data available"],
-      "Medication": parsed["Medication"] || ["No data available"],
-    };
-
+    if (templateMeta) note._templateMeta = templateMeta;
+    return note;
   } catch (err) {
-    console.error("[SOAP_NOTE] generation failed:", err.message);
-    return {
-      "Chief Complaints": ["Error generating note"],
-      "History of Present Illness": ["Error generating note"],
-      "Subjective": ["Error generating note"],
-      "Objective": ["Error generating note"],
-      "Assessment": ["Error generating note"],
-      "Plan": ["Error generating note"],
-      "Medication": ["Error generating note"],
-    };
+    console.error("[SOAP_NOTE] generation failed:", err?.message || err);
+    return { Error: ["Error generating note"] };
   }
 }
 

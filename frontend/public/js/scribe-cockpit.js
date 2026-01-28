@@ -1,126 +1,16 @@
-// -------------------------------------------------- scribe-cockpit.js --------------------------------------------------
-// Scribe cockpit with precise, persistent per-textbox edit tracking vs AI baseline,
-// and device-based status pill logic.
-//
-// INCREMENTAL, PERSISTENT EDIT LOGIC
-// - On every input, we diff PREV -> NOW (insert/delete only via LCS).
-// - Insertions: +N (new chars tagged 'U' = user).
-// - Deletions of 'B' (baseline/AI chars): +N.
-// - Deletions of 'U' (user-added chars): -N (refund).
-// - Substitutions = delete + insert at the caret (counts both).
-// - Edits accumulate and are saved in localStorage per section.
-// - Provenance (char tags) is stored as RLE of 'B'/'U' and restored after refresh.
-//
-// DEVICE STATUS PILL LOGIC
-// - 2 or more devices online: "Connected" (green)
-// - Exactly 1 device online: "Connecting" (yellow)
-// - 0 devices: "Disconnected" (red)
-//
-// Medication availability UX (UPDATED):
-// - Uses animated emojis: ✅ available, ❌ unavailable, ⏳ pending.
-// - Persists results in localStorage and restores on refresh without re-calling the API.
-// - Calls API ONLY when Medication textarea content changes (vs last validated text).
-//
-// Workflow/UI preserved:
-// - Global "Total Edits" badge on first SOAP heading.
-// - "Add To EHR" always disabled (red).
-// - Clear / Save / Add EHR zero visible counters and REBASE provenance to current text (all 'B').
-
-console.log('[SCRIBE] Booting Scribe Cockpit (incremental + persistent edit tracking + device-aware status + emoji meds)');
-
-// ==========================
+// ====
 // DOM elements
-// ==========================
+// ====
 const statusPill = document.getElementById('statusPill');
 const deviceListEl = document.getElementById('deviceList');
 const transcriptEl = document.getElementById('liveTranscript');
+const templateSelectEl = document.getElementById('templateSelect');
 let soapHost = document.getElementById('soapNotePanel');
 
-// Action buttons live in HTML (per your structure)
+// Action buttons (existing)
 const clearBtnEl = document.getElementById('_scribe_clear');
 const saveBtnEl = document.getElementById('_scribe_save');
 const addEhrBtnEl = document.getElementById('_scribe_add_ehr');
-const XR_DOCK_SCREEN_ID = 2;
-
-// ==========================
-// XR Dock / Scribe Cockpit permissions (READ vs WRITE)
-// ==========================
-let xrDockPermissions = null;  // { read, write, edit, delete } or null (fail-open)
-
-/**
- * Load the logged-in user's rights for this screen from /api/platform/my-screens.
- * We try to match by route_path first ("/scribe-cockpit"), then by screen_name
- * containing "xr dock" or "scribe cockpit".
- */
-async function loadDockPermissions() {
-  try {
-    const res = await fetch('/api/platform/my-screens', {
-      method: 'GET',
-      credentials: 'include',
-      headers: { 'Accept': 'application/json' }
-    });
-
-    const data = await res.json();
-    const screens = data?.screens || [];
-
-    const match = screens.find(s => s.id === XR_DOCK_SCREEN_ID);
-
-    if (!match) {
-      console.warn("[SCRIBE] XR Dock screen ID not found, defaulting to unrestricted");
-      xrDockPermissions = null;
-      return;
-    }
-
-    xrDockPermissions = {
-      read: !!match.read,
-      write: !!match.write,
-      edit: !!match.edit,
-      delete: !!match.delete
-    };
-
-    console.log("[SCRIBE] XR Dock permissions:", xrDockPermissions);
-
-  } catch (e) {
-    console.warn("[SCRIBE] loadDockPermissions failed:", e);
-    xrDockPermissions = null;
-  }
-}
-
-
-/** True if user is allowed to write on this screen. If permissions missing, don't block. */
-function hasScribeWritePermission() {
-  if (!xrDockPermissions) return true;   // keep existing behaviour if we couldn't load
-  return !!xrDockPermissions.write;
-}
-
-/** Show same style of message as Create User when user is READ-only. */
-function notifyReadOnlyScribe() {
-  const msg = 'You only have READ permission for XR Dock. Editing is not allowed.';
-  if (typeof showToast === 'function') {
-    showToast(msg, 'error');
-  } else {
-    try { alert(msg); } catch { console.warn(msg); }
-  }
-}
-
-/** Lock UI for READ-only users: make SOAP boxes read-only and disable buttons. */
-function applyScribeReadOnlyUI() {
-  if (!xrDockPermissions || xrDockPermissions.write) return; // nothing to lock
-
-  console.log('[SCRIBE] Applying read-only UI for XR Dock / Scribe Cockpit');
-
-  const scroller = soapContainerEnsure();
-  const editors = scroller.querySelectorAll('textarea[data-section]');
-  editors.forEach(t => {
-    t.readOnly = true;
-    t.classList.add('scribe-readonly');
-  });
-
-  if (clearBtnEl) clearBtnEl.disabled = true;
-  if (saveBtnEl) saveBtnEl.disabled = true;
-  if (addEhrBtnEl) addEhrBtnEl.disabled = true;
-}
-
 
 if (!soapHost) {
   console.warn('[SCRIBE] soapNotePanel not found, creating dynamically');
@@ -130,55 +20,80 @@ if (!soapHost) {
   document.body.appendChild(soapHost);
 }
 
-// ==========================
+// ====
 // Constants & State
-// ==========================
+// ====
 const PLACEHOLDER_ID = 'scribe-transcript-placeholder';
 const MAX_TRANSCRIPT_LINES = 300;
+
+/**
+ * ROOM-SCOPED STORAGE (from scribe.js)
+ * - When currentRoom is set (room_joined), all transcript/SOAP state is isolated per room.
+ * - When not paired (currentRoom = null), we fall back to legacy keys to preserve existing behavior.
+ */
+let currentRoom = null; // cockpit view-only room, set from room_joined
+let COCKPIT_FOR_XR_ID = null; // client-known xrId (from /api/platform/me)
+
 function roomLS(base) {
-  // room-scoped keys; fallback keeps behavior before pairing
   const r = currentRoom || '__noroom__';
   return `scribe:${r}:${base}`;
 }
 
-const LS_KEYS = {
-  HISTORY: () => roomLS('history'),
-  LATEST_SOAP: () => roomLS('latestSoap'),
-  ACTIVE_ITEM_ID: () => roomLS('activeItem'),
-  MED_AVAIL: () => roomLS('medAvailability'),
+// Legacy (your existing working cockpit keys)
+const LEGACY_KEYS = {
+  HISTORY: 'scribe.history',
+  LATEST_SOAP: 'scribe.latestSoap',
+  ACTIVE_ITEM_ID: 'scribe.activeItem',
+  MED_AVAIL: 'scribe.medAvailability',
 };
 
+const LS_KEYS = {
+  HISTORY: () => (currentRoom ? roomLS('history') : LEGACY_KEYS.HISTORY),
+  LATEST_SOAP: () => (currentRoom ? roomLS('latestSoap') : LEGACY_KEYS.LATEST_SOAP), // kept for backward compatibility
+  ACTIVE_ITEM_ID: () => (currentRoom ? roomLS('activeItem') : LEGACY_KEYS.ACTIVE_ITEM_ID),
+  MED_AVAIL: () => (currentRoom ? roomLS('medAvailability') : LEGACY_KEYS.MED_AVAIL),
+};
 
-const NGROK_URL = 'http://localhost:8080';
-const AZURE_URL = 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
+// Rename per your request
+const local = 'http://localhost:8080';
+const production = 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net';
+
+// Optional override: window.SCRIBE_PUBLIC_ENDPOINTS = [localUrl, productionUrl]
 const OVERRIDES = Array.isArray(window.SCRIBE_PUBLIC_ENDPOINTS) ? window.SCRIBE_PUBLIC_ENDPOINTS : null;
+const LOCAL = (OVERRIDES?.[0] || local).replace(/\/$/, '');
+const PRODUCTION = (OVERRIDES?.[1] || production).replace(/\/$/, '');
 
-const NGROK = (OVERRIDES?.[0] || NGROK_URL).replace(/\/$/, '');
-const AZURE = (OVERRIDES?.[1] || AZURE_URL).replace(/\/$/, '');
 const host = location.hostname;
-const isLocal = location.protocol === 'file:' || host === 'localhost' || host === '127.0.0.1' || host.endsWith('.local') ||
-  /^192\.168\./.test(host) || /^10\./.test(host) || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
-const preferred = isLocal ? NGROK : AZURE;
-const fallback = isLocal ? AZURE : NGROK;
+const isLocal =
+  location.protocol === 'file:' ||
+  host === 'localhost' ||
+  host === '127.0.0.1' ||
+  host.endsWith('.local') ||
+  /^192\.168\./.test(host) ||
+  /^10\./.test(host) ||
+  /^172\.(1[6-9]|2\d|3[0-1])\./.test(host);
+
+const preferred = isLocal ? LOCAL : PRODUCTION;
+const fallback = isLocal ? PRODUCTION : LOCAL;
 
 let SERVER_URL = null;
 let socket = null;
 
-
-
-// In-memory UI state
-let latestSoapNote = {};                   // last received/edited SOAP payload
-const transcriptState = { byKey: {} };     // merges partial transcript chunks per (from->to)
+// UI state
+let latestSoapNote = {}; // currently displayed note (default/template for active transcript)
+const transcriptState = { byKey: {} };
 let soapNoteTimer = null;
 let soapNoteStartTime = null;
 let currentActiveItemId = null;
 let soapGenerating = false;
 
-// Global "Total Edits" badge node
-let totalEditsBadgeEl = null
+// Tracks which transcript item the next incoming soap_note_console belongs to
+let pendingSoapItemId = null;
 
-// Per-textarea incremental state (provenance + counters), kept at runtime;
-// persisted into latestSoapNote._editMeta on every change.
+// Total edits badge element
+let totalEditsBadgeEl = null;
+
+// Per-textarea incremental state (runtime), persisted into note._editMeta
 const editStateMap = new WeakMap();
 /*
   For each <textarea>:
@@ -189,45 +104,349 @@ const editStateMap = new WeakMap();
   }
 */
 
-// ==========================
+// ====
 // BroadcastChannels (optional multi-tab sync)
-// ==========================
-const transcriptBC = new BroadcastChannel('scribe-transcript');
-const soapBC = new BroadcastChannel('scribe-soap-note');
+// ====
+let transcriptBC = null;
+let soapBC = null;
+try {
+  transcriptBC = new BroadcastChannel('scribe-transcript');
+  soapBC = new BroadcastChannel('scribe-soap-note');
+} catch (e) {
+  console.warn('[SCRIBE] BroadcastChannel unavailable:', e);
+}
 
-// ==========================
+// ====
 // localStorage helpers
-// ==========================
+// ====
 function lsSafeParse(key, fallback) {
-  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
-  catch { return fallback; }
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
 }
-function saveHistory(arr) { localStorage.setItem(LS_KEYS.HISTORY(), JSON.stringify(arr || [])); }
-function loadHistory() { return lsSafeParse(LS_KEYS.HISTORY(), []); }
-
-function saveLatestSoap(soap) { localStorage.setItem(LS_KEYS.LATEST_SOAP(), JSON.stringify(soap || {})); }
-function loadLatestSoap() { return lsSafeParse(LS_KEYS.LATEST_SOAP(), {}); }
-
-function saveActiveItemId(id) { localStorage.setItem(LS_KEYS.ACTIVE_ITEM_ID(), id || ''); }
-function loadActiveItemId() { return localStorage.getItem(LS_KEYS.ACTIVE_ITEM_ID()) || ''; }
-
-function uid() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
-
-// Medication availability persistence
-function saveMedStatus(byName, lastText) {
-  const payload = { byName: byName || {}, lastText: lastText || '' };
-  localStorage.setItem(LS_KEYS.MED_AVAIL(), JSON.stringify(payload));
+function saveHistory(arr) {
+  localStorage.setItem(LS_KEYS.HISTORY(), JSON.stringify(arr || []));
 }
-function loadMedStatus() {
-  const { byName = {}, lastText = '' } =
-    lsSafeParse(LS_KEYS.MED_AVAIL(), { byName: {}, lastText: '' }) || {};
-  return { byName, lastText };
+function loadHistory() {
+  return lsSafeParse(LS_KEYS.HISTORY(), []);
+}
+function saveLatestSoap(soap) {
+  localStorage.setItem(LS_KEYS.LATEST_SOAP(), JSON.stringify(soap || {}));
+}
+function loadLatestSoap() {
+  return lsSafeParse(LS_KEYS.LATEST_SOAP(), {});
+}
+function saveActiveItemId(id) {
+  localStorage.setItem(LS_KEYS.ACTIVE_ITEM_ID(), id || '');
+}
+function loadActiveItemId() {
+  return localStorage.getItem(LS_KEYS.ACTIVE_ITEM_ID()) || '';
+}
+function uid() {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+// ====
+// UI Styles (dropdown + readability)
+// ====
+function ensureUiStyles() {
+  if (document.getElementById('scribe-ui-css')) return;
 
-// ==========================
+  // Match your screen (dark navy main background + slightly lighter input box)
+  const MAIN_BG = '#0b1220';   // main screen bg (heading bar should match this)
+  const BOX_BG  = '#111827';   // soap note box background (textarea + section body)
+  const TEXT    = '#e5e7eb';   // primary text
+  const MUTED   = '#94a3b8';   // secondary text
+  const BORDER  = 'rgba(148,163,184,0.25)';
+
+  const s = document.createElement('style');
+  s.id = 'scribe-ui-css';
+  s.textContent = `
+    /* Template dropdown requested styling */
+    #templateSelect {
+      background: #111827 !important;
+      color: #ffff !important;
+      border: 1px solid rgba(255,255,255,0.25) !important;
+      border-radius: 8px;
+      padding: 6px 10px;
+      outline: none;
+    }
+    #templateSelect:hover {
+      background: rgba(55, 65, 81, 0.75) !important; /* grey hover */
+    }
+    #templateSelect:focus {
+      box-shadow: 0 0 0 2px rgba(96,165,250,0.55);
+    }
+    #templateSelect option {
+      background: ${MAIN_BG} !important;
+      color: #ffff !important;
+    }
+
+    /* SOAP NOTE PANEL: only adjust the SOAP box theme (dark like your screenshot) */
+    #soapNotePanel, #soapScroller {
+      background: ${MAIN_BG} !important;
+      color: ${TEXT} !important;
+    }
+
+    .scribe-soap-scroll {
+      padding: 10px 12px;
+      height: 100%;
+      overflow: auto;
+      background: ${MAIN_BG} !important;
+    }
+
+    .scribe-section {
+      margin: 10px 0;
+      border: 1px solid ${BORDER};
+      border-radius: 10px;
+      overflow: hidden;
+      background: ${BOX_BG} !important;
+    }
+
+    /* Heading bar should match main screen bg */
+    .scribe-section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      background: ${MAIN_BG} !important;
+      color: ${TEXT} !important;
+      border-bottom: 1px solid ${BORDER};
+    }
+
+    .scribe-section-head h3 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 700;
+      color: ${TEXT} !important;
+    }
+
+    .scribe-section-meta {
+      font-size: 12px;
+      color: ${MUTED} !important;
+      white-space: nowrap;
+      opacity: 0.95;
+    }
+
+    .scribe-textarea {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px 12px;
+      border: none;
+      outline: none;
+      resize: none;
+      background: ${BOX_BG} !important; /* FIX: was ##111827 */
+      color: ${TEXT} !important;        /* FIX: was #ffff */
+      font-size: 14px;
+      line-height: 1.45;
+      min-height: 80px;
+    }
+  `;
+  document.head.appendChild(s);
+}
+
+// ====
+// Per-transcript template workflow (MAIN CHANGE)
+// ====
+/**
+ * Each transcript item stores:
+ * item.notes = { default: noteObj|null, templates: { [templateId]: noteObj } }
+ * item.activeTemplateId = 'default' | '<id>'
+ *
+ * Selecting a template ONLY affects the active transcript item.
+ */
+function normalizeHistoryItems(hist) {
+  let changed = false;
+
+  for (const item of hist) {
+    // Backward compatibility:
+    // old code may have: item.soap (single note)
+    // treat it as default note
+    if (!item.notes) {
+      item.notes = { default: null, templates: {} };
+      changed = true;
+    }
+    if (item.soap && !item.notes.default) {
+      item.notes.default = item.soap;
+      delete item.soap;
+      changed = true;
+    }
+    if (!item.notes.templates) {
+      item.notes.templates = {};
+      changed = true;
+    }
+    if (!item.activeTemplateId) {
+      item.activeTemplateId = 'default';
+      changed = true;
+    }
+  }
+
+  if (changed) saveHistory(hist);
+  return hist;
+}
+
+function getActiveHistoryContext() {
+  const hist = normalizeHistoryItems(loadHistory());
+  const activeId = loadActiveItemId();
+  const idx = activeId ? hist.findIndex(x => x.id === activeId) : -1;
+  const i = idx !== -1 ? idx : (hist.length ? hist.length - 1 : -1);
+  return { hist, index: i, item: i !== -1 ? hist[i] : null };
+}
+
+function getNoteForItem(item) {
+  if (!item) return {};
+  const t = String(item.activeTemplateId || 'default');
+  if (t === 'default') return item.notes?.default || {};
+  return item.notes?.templates?.[t] || item.notes?.default || {};
+}
+
+function setTemplateSelectValue(value) {
+  if (!templateSelectEl) return;
+  const v = String(value ?? 'default');
+  const has = Array.from(templateSelectEl.options || []).some(o => o.value === v);
+  templateSelectEl.value = has ? v : 'default';
+}
+
+function syncDropdownToActiveTranscript() {
+  if (!templateSelectEl) return;
+  const { item } = getActiveHistoryContext();
+  setTemplateSelectValue(item?.activeTemplateId || 'default');
+}
+
+async function applyTemplateToActiveTranscript(newTemplateId) {
+  if (!SERVER_URL) return;
+  const templateId = String(newTemplateId || 'default');
+
+  const ctx = getActiveHistoryContext();
+  if (!ctx.item) return;
+
+  const item = ctx.item;
+  item.activeTemplateId = templateId;
+
+  // Save now (so switching transcripts remembers selection)
+  saveHistory(ctx.hist);
+  saveActiveItemId(item.id);
+
+  // If default: show default note only
+  if (templateId === 'default') {
+    latestSoapNote = item.notes?.default || {};
+    saveLatestSoap(latestSoapNote);
+    soapGenerating = false;
+    renderSoapNote(latestSoapNote);
+    return;
+  }
+
+  // If already generated for this template, reuse it
+  if (item.notes?.templates?.[templateId]) {
+    latestSoapNote = item.notes.templates[templateId];
+    saveLatestSoap(latestSoapNote);
+    soapGenerating = false;
+    renderSoapNote(latestSoapNote);
+    return;
+  }
+
+  // Generate template note for THIS transcript only
+  const transcript = String(item.text || '').trim();
+  if (!transcript) {
+    latestSoapNote = item.notes?.default || {};
+    renderSoapNote(latestSoapNote);
+    return;
+  }
+
+  if (soapNoteTimer) { clearInterval(soapNoteTimer); soapNoteTimer = null; }
+
+  soapGenerating = true;
+  renderSoapNoteGenerating(0);
+
+  try {
+    const resp = await fetch(`${SERVER_URL}/api/notes/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transcript, templateId }),
+    });
+
+    if (!resp.ok) {
+      console.warn('[TEMPLATE] /api/notes/generate failed:', resp.status);
+      soapGenerating = false;
+      latestSoapNote = getNoteForItem(item);
+      renderSoapNote(latestSoapNote);
+      return;
+    }
+
+    const data = await resp.json();
+    const note = data.note || {};
+
+    // New AI baseline -> reset counters for this newly generated note
+    initializeEditMetaForSoap(note);
+
+    // Store ONLY on this transcript item
+    item.notes = item.notes || { default: null, templates: {} };
+    item.notes.templates = item.notes.templates || {};
+    item.notes.templates[templateId] = note;
+
+    // Persist history
+    ctx.hist[ctx.index] = item;
+    saveHistory(ctx.hist);
+
+    latestSoapNote = note;
+    saveLatestSoap(latestSoapNote);
+
+    soapGenerating = false;
+    renderSoapNote(latestSoapNote);
+  } catch (e) {
+    console.warn('[TEMPLATE] regenerate error', e);
+    soapGenerating = false;
+    latestSoapNote = getNoteForItem(item);
+    renderSoapNote(latestSoapNote);
+  }
+}
+
+// ====
+// Templates dropdown population
+// ====
+async function initTemplateDropdown() {
+  if (!templateSelectEl || !SERVER_URL) return;
+
+  templateSelectEl.innerHTML = '';
+
+  const optDefault = document.createElement('option');
+  optDefault.value = 'default';
+  optDefault.textContent = 'SOAP Note';
+  templateSelectEl.appendChild(optDefault);
+
+  try {
+    const resp = await fetch(`${SERVER_URL}/api/templates`);
+    if (resp.ok) {
+      const data = await resp.json();
+      const templates = data.templates || [];
+      templates.forEach(t => {
+        const opt = document.createElement('option');
+        opt.value = String(t.id);
+        opt.textContent = t.name || t.short_name || `Template ${t.id}`;
+        templateSelectEl.appendChild(opt);
+      });
+    } else {
+      console.warn('[TEMPLATE] /api/templates failed:', resp.status);
+    }
+  } catch (e) {
+    console.warn('[TEMPLATE] template fetch error', e);
+  }
+
+  // Set dropdown to the ACTIVE transcript's selection
+  syncDropdownToActiveTranscript();
+
+  templateSelectEl.onchange = () => {
+    applyTemplateToActiveTranscript(templateSelectEl.value || 'default');
+  };
+}
+
+// ====
 // Status pill
-// ==========================
+// ====
 function setStatus(status) {
   if (!statusPill) return;
   statusPill.textContent = status;
@@ -236,16 +455,13 @@ function setStatus(status) {
   switch ((status || '').toLowerCase()) {
     case 'connected': statusPill.classList.add('bg-green-500'); break;
     case 'disconnected': statusPill.classList.add('bg-red-600'); break;
-    default: statusPill.classList.add('bg-yellow-500'); // 'connecting' or anything else
+    default: statusPill.classList.add('bg-yellow-500');
   }
 }
 
-// ==========================
-// Devices list + device-aware status
-
-let currentRoom = null; // cockpit view-only room, set from room_joined
-
-let COCKPIT_FOR_XR_ID = null; // client-known xrId (from /api/platform/me)
+// ====
+// Devices list + device-aware status  (UPDATED: room/connection logic from scribe.js)
+// ====
 
 // --- cockpit request_device_list throttling (prevents server log "shake") ---
 let _reqListTimer = null;
@@ -277,10 +493,6 @@ function requestDeviceListThrottled(why) {
   }, 50);
 }
 
-
-let _lastDeviceListSig = null;
-
-
 function updateConnectionStatus(src = '', devices = []) {
   const connected = !!(socket && socket.connected);
   const count = Array.isArray(devices) ? devices.length : 0;
@@ -292,18 +504,16 @@ function updateConnectionStatus(src = '', devices = []) {
     return;
   }
 
-  // XR Vision Dock logic
+  // XR Vision Dock logic: based on device_list count
   const status =
     count === 0 ? 'Disconnected' :
-      count === 1 ? 'Connecting' :
-        'Connected';
+    count === 1 ? 'Connecting' :
+    'Connected';
 
-  console.log('[COCKPIT][STATUS]', { src, connected, count, status });
+  console.log('[COCKPIT][STATUS]', { src, connected, count, status, currentRoom });
   setStatus(status);
 }
 
-
-// ==========================
 function showNoDevices() {
   if (!deviceListEl) return;
   deviceListEl.innerHTML = '';
@@ -314,49 +524,33 @@ function showNoDevices() {
 }
 
 /**
- * Update the device list UI and set the status pill strictly by device count:
- * - 2+ devices  -> Connected (green)
- * - 1 device    -> Connecting (yellow)
- * - 0 devices   -> Disconnected (red)
+ * - 2+ devices  -> Connected
+ * - 1 device    -> Connecting
+ * - 0 devices   -> Disconnected
  */
 function updateDeviceList(devices) {
-  // ✅ Server is authoritative — never trust cached UI state
   if (!Array.isArray(devices)) devices = [];
+  if (!deviceListEl) return;
 
-  // 🔥 Always clear first (prevents stale XR-8005)
   deviceListEl.innerHTML = '';
-
-  // ✅ XR Vision Dock status rule: based on device_list count (0=red, 1=yellow, 2+=green)
-  if (devices.length === 0) {
-    showNoDevices();
-  } else {
-    devices.forEach(d => {
-      if (!d || !d.xrId) return;
-      const name = d.deviceName || `Device (${d.xrId})`;
-      const li = document.createElement('li');
-      li.className = 'text-gray-300';
-      li.textContent = `${name} (${d.xrId})`;
-      deviceListEl.appendChild(li);
-    });
-  }
-
-  // ✅ XR Vision Dock status rule: based on device_list count (0=red, 1=yellow, 2+=green)
-  console.log('[COCKPIT][DEVICES] render', {
-    count: devices.length,
-    xrIds: devices.map(d => d?.xrId).filter(Boolean),
-    currentRoom
+  devices.forEach(d => {
+    const name = d.deviceName || d.name || (d.xrId ? `Device (${d.xrId})` : 'Unknown');
+    const li = document.createElement('li');
+    li.className = 'text-gray-300';
+    li.textContent = d.xrId ? `${name} (${d.xrId})` : name;
+    deviceListEl.appendChild(li);
   });
+  if (devices.length === 0) showNoDevices();
+
   updateConnectionStatus('device_list', devices);
-
-
 }
 
-
-
-// ==========================
+// ====
 // Transcript helpers
-// ==========================
-function transcriptKey(from, to) { return `${from || 'unknown'}->${to || 'unknown'}`; }
+// ====
+function transcriptKey(from, to) {
+  return `${from || 'unknown'}->${to || 'unknown'}`;
+}
 
 function mergeIncremental(prev, next) {
   if (!prev) return next || '';
@@ -383,43 +577,6 @@ function removeTranscriptPlaceholder() {
   if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
 }
 
-function createTranscriptCard(item) {
-  const { id, from, to, text, timestamp } = item;
-  const card = document.createElement('div');
-  card.className = 'scribe-card';
-  card.dataset.id = id;
-
-  const header = document.createElement('div');
-  header.className = 'text-sm mb-1';
-  const time = timestamp ? new Date(timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
-  header.innerHTML = `🗣️ <span class="font-bold">${escapeHtml(from || 'Unknown')}</span> <span class="opacity-60">→ ${escapeHtml(to || 'Unknown')}</span> <span class="opacity-60">(${time})</span>`;
-  card.appendChild(header);
-
-  const body = document.createElement('div');
-  body.className = 'text-sm leading-6 text-gray-100';
-  body.style.textAlign = 'justify';
-  body.textContent = text || '';
-  applyClamp(body, true);
-  card.appendChild(body);
-
-  const del = document.createElement('button');
-  del.setAttribute('data-action', 'delete');
-  del.className = 'scribe-delete';
-  del.title = 'Delete this transcript & linked SOAP';
-  del.innerHTML = '🗑️';
-  del.addEventListener('click', (e) => { e.stopPropagation(); deleteTranscriptItem(id); });
-  card.appendChild(del);
-
-  card.addEventListener('click', (e) => {
-    if (e.target.closest('button[data-action="delete"]')) return;
-    setActiveTranscriptId(id);
-    const collapsed = body.dataset.collapsed === 'true';
-    applyClamp(body, !collapsed);
-  });
-
-  if (id === loadActiveItemId()) card.classList.add('scribe-card-active');
-  return card;
-}
 function applyClamp(el, collapse = true) {
   if (collapse) {
     el.dataset.collapsed = 'true';
@@ -437,22 +594,75 @@ function applyClamp(el, collapse = true) {
     el.style.maxHeight = 'none';
   }
 }
+
+function createTranscriptCard(item) {
+  const { id, from, to, text, timestamp } = item;
+
+  const card = document.createElement('div');
+  card.className = 'scribe-card';
+  card.dataset.id = id;
+
+  const header = document.createElement('div');
+  header.className = 'text-sm mb-1';
+  const time = timestamp ? new Date(timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+  header.innerHTML =
+    `🗣️ <span class="font-bold">${escapeHtml(from || 'Unknown')}</span> ` +
+    `<span class="opacity-60">→ ${escapeHtml(to || 'Unknown')}</span> ` +
+    `<span class="opacity-60">(${time})</span>`;
+  card.appendChild(header);
+
+  const body = document.createElement('div');
+  body.className = 'text-sm leading-6 text-gray-100';
+  body.style.textAlign = 'justify';
+  body.textContent = text || '';
+  applyClamp(body, true);
+  card.appendChild(body);
+
+  const del = document.createElement('button');
+  del.setAttribute('data-action', 'delete');
+  del.className = 'scribe-delete';
+  del.title = 'Delete this transcript & linked notes';
+  del.innerHTML = '🗑️';
+  del.addEventListener('click', (e) => {
+    e.stopPropagation();
+    deleteTranscriptItem(id);
+  });
+  card.appendChild(del);
+
+  card.addEventListener('click', (e) => {
+    if (e.target.closest('button[data-action="delete"]')) return;
+    setActiveTranscriptId(id);
+    const collapsed = body.dataset.collapsed === 'true';
+    applyClamp(body, !collapsed);
+  });
+
+  if (id === loadActiveItemId()) card.classList.add('scribe-card-active');
+  return card;
+}
+
 function highlightActiveCard() {
+  if (!transcriptEl) return;
   transcriptEl.querySelectorAll('.scribe-card').forEach(c => c.classList.remove('scribe-card-active'));
   const active = transcriptEl.querySelector(`.scribe-card[data-id="${CSS.escape(loadActiveItemId())}"]`);
   if (active) active.classList.add('scribe-card-active');
 }
+
 function setActiveTranscriptId(id) {
   currentActiveItemId = id;
   saveActiveItemId(id);
   highlightActiveCard();
-  const hist = loadHistory();
-  const item = hist.find(x => x.id === id);
-  const soap = item?.soap || {};
-  latestSoapNote = Object.keys(soap).length ? soap : loadLatestSoap();
+
+  const ctx = getActiveHistoryContext();
+  latestSoapNote = getNoteForItem(ctx.item) || loadLatestSoap() || {};
+
   if (!soapGenerating) renderSoapNote(latestSoapNote);
+
+  // IMPORTANT: dropdown reflects THIS transcript's template selection (per-transcript)
+  syncDropdownToActiveTranscript();
 }
+
 function trimTranscriptIfNeeded() {
+  if (!transcriptEl) return;
   const cards = transcriptEl.querySelectorAll('.scribe-card');
   if (cards.length > MAX_TRANSCRIPT_LINES) {
     const excess = cards.length - MAX_TRANSCRIPT_LINES;
@@ -465,47 +675,107 @@ function trimTranscriptIfNeeded() {
 
 function appendTranscriptItem({ from, to, text, timestamp }) {
   if (!transcriptEl || !text) return;
+
   removeTranscriptPlaceholder();
-  const item = { id: uid(), from: from || 'Unknown', to: to || 'Unknown', text: String(text || ''), timestamp: timestamp || Date.now() };
-  const history = loadHistory(); history.push(item); saveHistory(history);
+
+  const item = {
+    id: uid(),
+    from: from || 'Unknown',
+    to: to || 'Unknown',
+    text: String(text || '').trim(),
+    timestamp: timestamp || Date.now(),
+
+    // NEW: per-transcript notes + per-transcript template selection
+    notes: { default: null, templates: {} },
+    activeTemplateId: 'default',
+  };
+
+  const hist = normalizeHistoryItems(loadHistory());
+  hist.push(item);
+  saveHistory(hist);
+
   const card = createTranscriptCard(item);
   transcriptEl.appendChild(card);
   trimTranscriptIfNeeded();
   transcriptEl.scrollTop = transcriptEl.scrollHeight;
+
+  // Set active transcript & remember upcoming SOAP belongs to this transcript
+  pendingSoapItemId = item.id;
   setActiveTranscriptId(item.id);
+
+  // Broadcast (optional) + include roomId to avoid cross-room mixing
+  transcriptBC?.postMessage?.({ type: 'transcript_console', roomId: currentRoom, data: { ...item, final: true } });
 }
 
 function deleteTranscriptItem(id) {
-  const history = loadHistory(); const idx = history.findIndex(x => x.id === id);
+  const hist = normalizeHistoryItems(loadHistory());
+  const idx = hist.findIndex(x => x.id === id);
   if (idx === -1) return;
-  history.splice(idx, 1); saveHistory(history);
-  const node = transcriptEl.querySelector(`.scribe-card[data-id="${CSS.escape(id)}"]`);
+
+  hist.splice(idx, 1);
+  saveHistory(hist);
+
+  const node = transcriptEl?.querySelector(`.scribe-card[data-id="${CSS.escape(id)}"]`);
   if (node) node.remove();
-  const remainingCards = transcriptEl.querySelectorAll('.scribe-card');
-  if (remainingCards.length === 0) {
+
+  const remaining = transcriptEl?.querySelectorAll('.scribe-card') || [];
+  if (remaining.length === 0) {
     ensureTranscriptPlaceholder();
-    latestSoapNote = {}; saveLatestSoap(latestSoapNote);
+    latestSoapNote = {};
+    saveLatestSoap(latestSoapNote);
     saveActiveItemId('');
     if (!soapGenerating) renderSoapBlank();
+    if (templateSelectEl) setTemplateSelectValue('default');
     return;
   }
+
   const activeId = loadActiveItemId();
   if (activeId === id) {
-    const newActive = history.length ? history[history.length - 1].id : '';
+    const newActive = hist.length ? hist[hist.length - 1].id : '';
     if (newActive) setActiveTranscriptId(newActive);
-    else {
-      latestSoapNote = {}; saveLatestSoap(latestSoapNote); saveActiveItemId('');
-      if (!soapGenerating) renderSoapBlank();
-    }
   } else {
     highlightActiveCard();
   }
 }
 
-// ==========================
+// ====
+// SOAP sections ordering
+// ====
+function getSoapSections(soap) {
+  const defaultSections = [
+    'Chief Complaints',
+    'History of Present Illness',
+    'Subjective',
+    'Objective',
+    'Assessment',
+    'Plan',
+    'Medication',
+  ];
+
+  const comps = soap?._templateMeta?.components;
+  if (Array.isArray(comps) && comps.length) {
+    const ordered = comps
+      .slice()
+      .sort((a, b) => Number(a.position ?? 0) - Number(b.position ?? 0))
+      .map(x => String(x.name || '').trim())
+      .filter(Boolean);
+
+    if (ordered.length) return ordered;
+  }
+
+  const keys = Object.keys(soap || {}).filter(k => !k.startsWith('_'));
+  if (keys.length) {
+    const hasAnyDefault = defaultSections.some(s => keys.includes(s));
+    if (!hasAnyDefault) return keys;
+  }
+
+  return defaultSections;
+}
+
+// ====
 // INCREMENTAL EDIT TRACKING (persistent)
-// ==========================
-const MAX_DELTA_CELLS = 200000; // (n+1)*(m+1) guardrail
+// ====
+const MAX_DELTA_CELLS = 20000;
 
 // RLE encode/decode for provenance tags ('B'/'U')
 function rleEncodeTags(tags) {
@@ -526,8 +796,8 @@ function rleDecodeToTags(rle, targetLen) {
     for (let i = 0; i < cnt && tags.length < targetLen; i++) tags.push(tag === 'U' ? 'U' : 'B');
     if (tags.length >= targetLen) break;
   }
-  if (tags.length < targetLen) while (tags.length < targetLen) tags.push('B');
-  else if (tags.length > targetLen) tags.length = targetLen;
+  while (tags.length < targetLen) tags.push('B');
+  if (tags.length > targetLen) tags.length = targetLen;
   return tags;
 }
 
@@ -559,8 +829,11 @@ function fastGreedyDelta(prevAnn, nextText, state) {
   while (p < prevChars.length && p < nextChars.length && prevChars[p] === nextChars[p]) p++;
 
   let s = 0;
-  while (s < prevChars.length - p && s < nextChars.length - p &&
-    prevChars[prevChars.length - 1 - s] === nextChars[nextChars.length - 1 - s]) s++;
+  while (
+    s < prevChars.length - p &&
+    s < nextChars.length - p &&
+    prevChars[prevChars.length - 1 - s] === nextChars[nextChars.length - 1 - s]
+  ) s++;
 
   for (let i = p; i < prevChars.length - s; i++) {
     const removed = prevAnn[i];
@@ -602,6 +875,7 @@ function exactDeltaViaLcs(prevAnn, nextText, state) {
       j--;
     }
   }
+
   while (i > 0) {
     const removed = prevAnn[i - 1];
     if (removed.tag === 'U') state.ins = Math.max(0, state.ins - 1);
@@ -630,24 +904,23 @@ function applyIncrementalDiff(box, newText) {
   const n = prevAnn.length, m = newText.length;
 
   let newAnn;
-  if ((n + 1) * (m + 1) > MAX_DELTA_CELLS) {
-    newAnn = fastGreedyDelta(prevAnn, newText, state);
-  } else {
-    newAnn = exactDeltaViaLcs(prevAnn, newText, state);
-  }
+  if ((n + 1) * (m + 1) > MAX_DELTA_CELLS) newAnn = fastGreedyDelta(prevAnn, newText, state);
+  else newAnn = exactDeltaViaLcs(prevAnn, newText, state);
 
   state.ann = newAnn;
-  const total = Math.max(0, state.ins) + Math.max(0, state.del);
-  return total;
+  return Math.max(0, state.ins) + Math.max(0, state.del);
 }
 
-// Persist/Restore per-section incremental state
+// Persist/Restore per-section incremental state into latestSoapNote._editMeta
 function persistSectionState(section, state) {
   latestSoapNote._editMeta = latestSoapNote._editMeta || {};
   const tags = state.ann.map(x => x.tag);
-  const provRLE = rleEncodeTags(tags);
-  const edits = Math.max(0, state.ins) + Math.max(0, state.del);
-  latestSoapNote._editMeta[section] = { edits, ins: state.ins, del: state.del, provRLE };
+  latestSoapNote._editMeta[section] = {
+    edits: Math.max(0, state.ins) + Math.max(0, state.del),
+    ins: state.ins,
+    del: state.del,
+    provRLE: rleEncodeTags(tags),
+  };
   saveLatestSoap(latestSoapNote);
 }
 
@@ -657,7 +930,7 @@ function restoreSectionState(section, contentText) {
     return { ann: Array.from(contentText).map(ch => ({ ch, tag: 'B' })), ins: 0, del: 0, edits: 0 };
   }
   const tags = rleDecodeToTags(meta.provRLE, contentText.length);
-  const ann = Array.from(contentText).map((ch, i) => ({ ch, tag: (tags[i] === 'U' ? 'U' : 'B') }));
+  const ann = Array.from(contentText).map((ch, i) => ({ ch, tag: tags[i] === 'U' ? 'U' : 'B' }));
   const ins = Number.isFinite(meta.ins) ? meta.ins : 0;
   const del = Number.isFinite(meta.del) ? meta.del : 0;
   const edits = Number.isFinite(meta.edits) ? meta.edits : Math.max(0, ins) + Math.max(0, del);
@@ -671,14 +944,12 @@ function rebaseBoxStateToCurrent(box) {
   state.ins = 0;
   state.del = 0;
   editStateMap.set(box, state);
-
-  const section = box.dataset.section;
-  persistSectionState(section, state);
+  persistSectionState(box.dataset.section, state);
 }
 
-// ==========================
+// ====
 // SOAP note rendering
-// ==========================
+// ====
 function soapContainerEnsure() {
   let scroller = document.getElementById('soapScroller');
   if (!scroller) {
@@ -690,84 +961,24 @@ function soapContainerEnsure() {
   return scroller;
 }
 function renderSoapBlank() {
-  const scroller = soapContainerEnsure();
-  scroller.innerHTML = '';
+  soapContainerEnsure().innerHTML = '';
 }
 function autoExpandTextarea(el) {
   el.style.height = 'auto';
   el.style.height = el.scrollHeight + 'px';
 }
 
-function initializeEditMetaForSoap(soap) {
-  soap._aiMeta = soap._aiMeta || {};
-  soap._editMeta = soap._editMeta || {};
-  const sections = ['Chief Complaints', 'History of Present Illness', 'Subjective', 'Objective', 'Assessment', 'Plan', 'Medication'];
-  sections.forEach(section => {
-    const val = soap?.[section] || '';
-    const textBlock = Array.isArray(val) ? val.join('\n') : String(val || '');
-    soap._aiMeta[section] = { text: textBlock };
-    soap._editMeta[section] = {
-      edits: 0, ins: 0, del: 0,
-      provRLE: rleEncodeTags(new Array(textBlock.length).fill('B'))
-    };
-  });
-}
-
-function persistSoapFromUI() {
-  const scroller = soapContainerEnsure();
-  const editors = scroller.querySelectorAll('textarea[data-section]');
-  const soap = {};
-  editors.forEach(t => { soap[t.dataset.section] = t.value || ''; });
-
-  soap._aiMeta = (latestSoapNote && latestSoapNote._aiMeta) ? latestSoapNote._aiMeta : {};
-  soap._editMeta = latestSoapNote?._editMeta || {};
-
-  const medTextarea = scroller.querySelector('textarea[data-section="Medication"]');
-  if (medTextarea) {
-    const medications = (medTextarea.value || '').split('\n')
-      .map(l => l.trim())
-      .filter(Boolean)
-      .map(name => ({
-        name,
-        available: medAvailability.has(normalizeDrugKey(name)) ? medAvailability.get(normalizeDrugKey(name)) : null
-      }));
-    soap.medications = medications;
-  }
-
-  latestSoapNote = soap;
-  saveLatestSoap(latestSoapNote);
-
-  const activeId = loadActiveItemId();
-  if (activeId) {
-    const hist = loadHistory();
-    const i = hist.findIndex(x => x.id === activeId);
-    if (i !== -1) { hist[i].soap = latestSoapNote; saveHistory(hist); }
-  }
-}
-
 function ensureTopHeadingBadge() {
-  if (totalEditsBadgeEl && document.body.contains(totalEditsBadgeEl)) return totalEditsBadgeEl;
+  const slot = document.getElementById('totalEditsSlot');
+  if (!slot) return null;
 
-  const candidates = Array.from(document.querySelectorAll('h1, h2, h3, [data-title]'));
-  let heading = candidates.find(el => (el.textContent || '').trim().toLowerCase().startsWith('soap note'));
-
-  if (!heading) {
-    const wrap = document.createElement('div');
-    wrap.className = 'scribe-heading-flex';
-    const h = document.createElement('h2');
-    h.textContent = 'SOAP Note';
-    wrap.appendChild(h);
-    soapHost.parentNode?.insertBefore(wrap, soapHost);
-    heading = wrap;
+  if (!totalEditsBadgeEl || !slot.contains(totalEditsBadgeEl)) {
+    totalEditsBadgeEl = document.createElement('span');
+    totalEditsBadgeEl.id = '_scribe_total_edits';
+    totalEditsBadgeEl.className = '_scribe_total_edits';
+    totalEditsBadgeEl.textContent = 'Total Edits: 0';
+    slot.replaceChildren(totalEditsBadgeEl);
   }
-
-  heading.classList.add('scribe-heading-flex');
-
-  totalEditsBadgeEl = document.createElement('div');
-  totalEditsBadgeEl.id = '_scribe_total_edits';
-  totalEditsBadgeEl.className = '_scribe_total_edits';
-  totalEditsBadgeEl.textContent = 'Total Edits: 0';
-  heading.appendChild(totalEditsBadgeEl);
   return totalEditsBadgeEl;
 }
 
@@ -775,11 +986,14 @@ function updateTotalsAndEhrState() {
   const scroller = soapContainerEnsure();
   const editors = scroller.querySelectorAll('textarea[data-section]');
   let total = 0;
+
   editors.forEach(t => {
-    const m = t.dataset.editCount ? Number(t.dataset.editCount) : 0;
-    total += m;
-    const headMeta = scroller.querySelector(`.scribe-section[data-section="${CSS.escape(t.dataset.section)}"] .scribe-section-meta`);
-    if (headMeta) headMeta.textContent = `Edits: ${m}`;
+    const n = Number(t.dataset.editCount || 0);
+    total += n;
+    const headMeta = scroller.querySelector(
+      `.scribe-section[data-section="${CSS.escape(t.dataset.section)}"] .scribe-section-meta`
+    );
+    if (headMeta) headMeta.textContent = `Edits: ${n}`;
   });
 
   const badge = ensureTopHeadingBadge();
@@ -791,15 +1005,79 @@ function updateTotalsAndEhrState() {
   }
 }
 
-function resetAllEditCountersToZero() {
+function initializeEditMetaForSoap(soap) {
+  soap._aiMeta = soap._aiMeta || {};
+  soap._editMeta = soap._editMeta || {};
+
+  const sections = getSoapSections(soap);
+  sections.forEach(section => {
+    const val = soap?.[section] || '';
+    const textBlock = Array.isArray(val) ? val.join('\n') : String(val || '');
+    soap._aiMeta[section] = { text: textBlock };
+    soap._editMeta[section] = {
+      edits: 0,
+      ins: 0,
+      del: 0,
+      provRLE: rleEncodeTags(new Array(textBlock.length).fill('B')),
+    };
+  });
+}
+
+function persistActiveNoteFromUI() {
+  const ctx = getActiveHistoryContext();
+  if (!ctx.item) return;
+
   const scroller = soapContainerEnsure();
   const editors = scroller.querySelectorAll('textarea[data-section]');
-  editors.forEach(textarea => {
+
+  const soap = {};
+  editors.forEach(t => { soap[t.dataset.section] = t.value || ''; });
+
+  soap._aiMeta = latestSoapNote?._aiMeta || {};
+  soap._editMeta = latestSoapNote?._editMeta || {};
+  if (latestSoapNote?._templateMeta) soap._templateMeta = latestSoapNote._templateMeta;
+
+  // store meds structured (optional)
+  const medTextarea = getMedicationTextarea(scroller);
+  if (medTextarea) {
+    const medications = (medTextarea.value || '')
+      .split('\n')
+      .map(l => l.trim())
+      .filter(Boolean)
+      .map(name => ({
+        name,
+        available: medAvailability.has(normalizeDrugKey(name)) ? medAvailability.get(normalizeDrugKey(name)) : null,
+      }));
+    soap.medications = medications;
+  }
+
+  // Update currently active note slot (default OR selected template for THIS transcript)
+  const item = ctx.item;
+  const t = String(item.activeTemplateId || 'default');
+  item.notes = item.notes || { default: null, templates: {} };
+  item.notes.templates = item.notes.templates || {};
+
+  if (t === 'default') item.notes.default = soap;
+  else item.notes.templates[t] = soap;
+
+  ctx.hist[ctx.index] = item;
+  saveHistory(ctx.hist);
+
+  latestSoapNote = soap;
+  saveLatestSoap(latestSoapNote);
+}
+
+function resetAllEditCountersToZero() {
+  const scroller = soapContainerEnsure();
+  scroller.querySelectorAll('textarea[data-section]').forEach(textarea => {
     rebaseBoxStateToCurrent(textarea);
     textarea.dataset.editCount = '0';
-    const headMeta = scroller.querySelector(`.scribe-section[data-section="${CSS.escape(textarea.dataset.section)}"] .scribe-section-meta`);
+    const headMeta = scroller.querySelector(
+      `.scribe-section[data-section="${CSS.escape(textarea.dataset.section)}"] .scribe-section-meta`
+    );
     if (headMeta) headMeta.textContent = `Edits: 0`;
   });
+
   if (latestSoapNote) latestSoapNote._editMeta = latestSoapNote._editMeta || {};
   Object.keys(latestSoapNote._aiMeta || {}).forEach(section => {
     latestSoapNote._editMeta[section] = latestSoapNote._editMeta[section] || {};
@@ -807,6 +1085,7 @@ function resetAllEditCountersToZero() {
     latestSoapNote._editMeta[section].ins = 0;
     latestSoapNote._editMeta[section].del = 0;
   });
+
   saveLatestSoap(latestSoapNote);
   updateTotalsAndEhrState();
 }
@@ -820,7 +1099,9 @@ function attachEditTrackingToTextarea(box, aiText) {
   box.dataset.editCount = String(restored.edits);
 
   const scroller = soapContainerEnsure();
-  const headMeta = scroller.querySelector(`.scribe-section[data-section="${CSS.escape(section)}"] .scribe-section-meta`);
+  const headMeta = scroller.querySelector(
+    `.scribe-section[data-section="${CSS.escape(section)}"] .scribe-section-meta`
+  );
   if (headMeta) headMeta.textContent = `Edits: ${restored.edits}`;
 
   box.dataset.aiText = aiText || '';
@@ -828,6 +1109,7 @@ function attachEditTrackingToTextarea(box, aiText) {
   let rafId = null;
   box.addEventListener('input', () => {
     autoExpandTextarea(box);
+
     if (rafId) cancelAnimationFrame(rafId);
     rafId = requestAnimationFrame(() => {
       try {
@@ -838,30 +1120,21 @@ function attachEditTrackingToTextarea(box, aiText) {
         const state = editStateMap.get(box);
         persistSectionState(section, state);
 
-        latestSoapNote = latestSoapNote || {};
-        latestSoapNote._editMeta = latestSoapNote._editMeta || {};
-        latestSoapNote._editMeta[section] = latestSoapNote._editMeta[section] || {};
-        latestSoapNote._editMeta[section].edits = totalEdits;
-        saveLatestSoap(latestSoapNote);
-
-        const headMetaNow = scroller.querySelector(`.scribe-section[data-section="${CSS.escape(section)}"] .scribe-section-meta`);
-        if (headMetaNow) headMetaNow.textContent = `Edits: ${totalEdits}`;
-
         updateTotalsAndEhrState();
-        persistSoapFromUI();
+        persistActiveNoteFromUI();
 
-        // Medication: show pending emojis and (debounced) validate ONLY when editing
-        if (section === 'Medication') {
-          medAvailability.clear();         // clear in-memory so overlay shows ⏳
-          renderMedicationInline();        // show ⏳ while typing
+        // Medication: validate only when user edits meds box
+        if (isMedicationSectionName(section)) {
+          medAvailability.clear();
+          medicationValidationPending = true;
+          renderMedicationInline();
 
           if (medicationDebounceTimer) clearTimeout(medicationDebounceTimer);
-          medicationDebounceTimer = setTimeout(() => {
-            checkMedicationsFromTextarea(box); // will call API only if content changed vs last validated text
-          }, 600);
+          medicationDebounceTimer = setTimeout(() => checkMedicationsFromTextarea(box), 600);
         }
-
-      } catch (e) { console.warn('[SCRIBE] input handler error', e); }
+      } catch (e) {
+        console.warn('[SCRIBE] input handler error', e);
+      }
       rafId = null;
     });
   });
@@ -869,20 +1142,19 @@ function attachEditTrackingToTextarea(box, aiText) {
 
 function renderSoapNote(soap) {
   if (soapGenerating) return;
+
   const scroller = soapContainerEnsure();
   scroller.innerHTML = '';
-
   ensureTopHeadingBadge();
-
-  const sections = ['Chief Complaints', 'History of Present Illness', 'Subjective', 'Objective', 'Assessment', 'Plan', 'Medication'];
 
   if (soap && Object.keys(soap).length && !soap._aiMeta) {
     initializeEditMetaForSoap(soap);
   }
 
-  latestSoapNote = latestSoapNote || soap || {};
-  latestSoapNote._aiMeta = latestSoapNote._aiMeta || (soap ? soap._aiMeta : {}) || {};
-  latestSoapNote._editMeta = latestSoapNote._editMeta || (soap ? soap._editMeta : {}) || {};
+  latestSoapNote = soap || {};
+  saveLatestSoap(latestSoapNote);
+
+  const sections = getSoapSections(latestSoapNote);
 
   sections.forEach(section => {
     const wrap = document.createElement('div');
@@ -908,17 +1180,18 @@ function renderSoapNote(soap) {
     box.readOnly = false;
     box.dataset.section = section;
 
-    const rawVal = soap?.[section];
+    const rawVal = latestSoapNote?.[section];
     const contentText = Array.isArray(rawVal) ? rawVal.join('\n') : (typeof rawVal === 'string' ? rawVal : '');
     box.value = contentText;
     autoExpandTextarea(box);
 
-    const aiText = soap?._aiMeta?.[section]?.text ?? contentText;
+    const aiText = latestSoapNote?._aiMeta?.[section]?.text ?? contentText;
+    latestSoapNote._aiMeta = latestSoapNote._aiMeta || {};
     latestSoapNote._aiMeta[section] = latestSoapNote._aiMeta[section] || { text: aiText };
 
     attachEditTrackingToTextarea(box, aiText);
 
-    if (section === 'Medication') {
+    if (isMedicationSectionName(section)) {
       const w = document.createElement('div');
       w.className = 'med-wrap';
       w.appendChild(box);
@@ -926,105 +1199,104 @@ function renderSoapNote(soap) {
     } else {
       wrap.appendChild(box);
     }
-    scroller.appendChild(wrap);
 
+    scroller.appendChild(wrap);
   });
 
-  saveLatestSoap(latestSoapNote);
   updateTotalsAndEhrState();
-
-  // Restore persisted medication availability (no API call here)
   renderMedicationInline();
 
   scroller.scrollTop = 0;
-  const firstBox = scroller.querySelector('textarea[data-section]');
-  if (firstBox) { try { firstBox.focus(); } catch { } }
 }
 
 function renderSoapNoteGenerating(elapsed) {
   const scroller = soapContainerEnsure();
   scroller.innerHTML = `
-    <div class="scribe-section" style="text-align:center; color:#fbbf24;">
-      Please wait, AI is generating the SOAP note… ${elapsed}s
+    <div class="scribe-section" style="text-align:center; color:#f59e0b; padding:16px;">
+      Please wait, AI is generating the note… ${elapsed}s
     </div>
   `;
   ensureTopHeadingBadge();
 }
 
-// ==========================
-// Drug Availability (inline in same box) — UPDATED with animated emojis + persistence
-// ==========================
-const medAvailability = new Map(); // Map<normalizedName, boolean>
-
-// Validation state
+// ====
+// Medication availability (inline emojis) + persistence
+// ====
+const medAvailability = new Map();
 let medicationValidationPending = false;
 let medicationDebounceTimer = null;
 
-// Normalize a drug string so signals and textarea lines match reliably
+// Persisted med statuses (keyed by normalized drug names)
+function saveMedStatus(byName, lastText) {
+  localStorage.setItem(LS_KEYS.MED_AVAIL(), JSON.stringify({ byName: byName || {}, lastText: lastText || '' }));
+}
+function loadMedStatus() {
+  const { byName = {}, lastText = '' } = lsSafeParse(LS_KEYS.MED_AVAIL(), { byName: {}, lastText: '' }) || {};
+  return { byName, lastText };
+}
+
+function isMedicationSectionName(section) {
+  const s = String(section || '').trim().toLowerCase();
+  return s === 'medication' || s === 'medications' || s.includes('medication');
+}
+
 function normalizeDrugKey(str) {
   if (!str) return '';
   let s = String(str).trim();
-
-  // Remove text like "for headache", "for joint pain"
   s = s.replace(/\s+for\s+.+$/i, '');
-
-  // Drop dosage/notes in parentheses/brackets and after hyphens/commas/colon
   s = s.replace(/\s*[\(\[\{].*?[\)\]\}]\s*$/g, '');
   s = s.split(/\s*[-,:@|]\s*/)[0];
-
-  // Collapse spaces, strip punctuation edges
   s = s.replace(/\s+/g, ' ').replace(/^[^a-z0-9]+|[^a-z0-9]+$/gi, '');
-
   return s.toLowerCase();
 }
 
 function normalizedMedicationBlock(textarea) {
-  const lines = (textarea?.value || '').split('\n')
+  const lines = (textarea?.value || '')
+    .split('\n')
     .map(l => l.trim())
     .filter(Boolean)
     .map(normalizeDrugKey);
   return lines.join('\n');
 }
 
-// Call API only if textarea content changed vs last validated text
 async function checkMedicationsFromTextarea(textarea) {
-  if (!textarea) return;
+  if (!textarea || !SERVER_URL) return;
 
   const currentNormalized = normalizedMedicationBlock(textarea);
   const { byName: persistedByName, lastText } = loadMedStatus();
 
-  // If unchanged since last validation, just restore and render; no API call.
+  // If unchanged since last validation: use cached statuses
   if (currentNormalized === lastText) {
     medAvailability.clear();
     Object.entries(persistedByName).forEach(([k, v]) => medAvailability.set(k, !!v));
     medicationValidationPending = false;
     renderMedicationInline();
-    updateAddToEhrButtonState();
     return;
   }
 
   const rawLines = (textarea.value || '').split('\n').map(l => l.trim()).filter(Boolean);
-  if (rawLines.length === 0) {
+  if (!rawLines.length) {
     medAvailability.clear();
     saveMedStatus({}, currentNormalized);
+    medicationValidationPending = false;
     renderMedicationInline();
-    updateAddToEhrButtonState();
     return;
   }
 
   medicationValidationPending = true;
-  showPendingIndicators();
+  renderMedicationInline();
 
   try {
     const response = await fetch(`${SERVER_URL}/api/medications/availability`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ names: rawLines })
+      body: JSON.stringify({ names: rawLines }),
     });
 
     if (!response.ok) {
       console.warn('[MED_CHECK] API error:', response.status);
       medicationValidationPending = false;
+      renderMedicationInline();
       return;
     }
 
@@ -1033,74 +1305,32 @@ async function checkMedicationsFromTextarea(textarea) {
 
     medAvailability.clear();
     const newByName = {};
+
     results.forEach(item => {
       const rawName = (item.name ?? item.query ?? item.drug ?? item.drugName ?? '').toString();
       const key = normalizeDrugKey(rawName);
       if (!key) return;
+
       const available =
         typeof item.available === 'boolean'
           ? item.available
           : (item.status === 'exists' || item.status === 'available' || item.status === true);
+
       medAvailability.set(key, !!available);
       newByName[key] = !!available;
     });
 
-    // Persist statuses & the exact normalized text these apply to
     saveMedStatus(newByName, currentNormalized);
-
     medicationValidationPending = false;
     renderMedicationInline();
-    updateAddToEhrButtonState();
   } catch (err) {
     console.error('[MED_CHECK] Error:', err);
     medicationValidationPending = false;
+    renderMedicationInline();
   }
 }
 
-function showPendingIndicators() {
-  const scroller = soapContainerEnsure();
-  const medSection = scroller.querySelector('.scribe-section[data-section="Medication"]');
-  if (!medSection) return;
-
-  const wrap = ensureMedicationWrap(medSection);
-  const overlay = wrap?.querySelector('.med-overlay');
-  if (!overlay) return;
-
-  const frag = document.createDocumentFragment();
-  const textarea = medSection.querySelector('textarea[data-section="Medication"]');
-  const lines = (textarea?.value || '').split('\n');
-
-  for (const raw of lines) {
-    const line = raw.trim();
-    const row = document.createElement('div');
-    row.className = 'med-line';
-
-    const nameSpan = document.createElement('span');
-    nameSpan.textContent = line;
-    // Avoid double-visual text (textarea already shows it)
-    nameSpan.style.color = 'transparent';
-    row.appendChild(nameSpan);
-
-    if (line) {
-      const badge = document.createElement('span');
-      badge.className = 'med-emoji med-pending';
-      badge.textContent = '⏳';
-      row.appendChild(badge);
-    }
-
-    frag.appendChild(row);
-  }
-
-  overlay.replaceChildren(frag);
-}
-
-function updateAddToEhrButtonState() {
-  if (!addEhrBtnEl) return;
-  // Always disabled per requirements; keep logic in case of future enablement.
-  addEhrBtnEl.disabled = true;
-}
-
-// Inject minimal CSS once (dark-theme friendly) — UPDATED to emoji + subtle animations
+// Medication overlay CSS
 function ensureMedStyles() {
   if (document.getElementById('med-inline-css')) return;
   const s = document.createElement('style');
@@ -1113,34 +1343,33 @@ function ensureMedStyles() {
       position: absolute; inset: 0; pointer-events: none;
       white-space: pre-wrap; overflow: hidden;
       font: inherit; line-height: inherit; color: inherit;
-      z-index: 2;  
-      opacity: 1 !important;
+      z-index: 2;
     }
-    /* Animations */
     @keyframes pulse {
       0%, 100% { transform: scale(1); opacity: 1; }
       50% { transform: scale(0.9); opacity: .7; }
     }
-    @keyframes pop {
-      0% { transform: scale(0.6); }
-      60% { transform: scale(1.08); }
-      100% { transform: scale(1); }
-    }
-    @keyframes wiggle {
-      0%, 100% { transform: rotate(0deg); }
-      25% { transform: rotate(-7deg); }
-      75% { transform: rotate(7deg); }
-    }
     .med-pending { animation: pulse 1.2s ease-in-out infinite; }
-    .med-available { animation: pop 250ms ease-out; }
-    .med-unavailable { animation: wiggle 400ms ease-in-out 2; }
   `;
   document.head.appendChild(s);
 }
 
-// Ensure textarea is wrapped so we can render inline overlay inside the same box
+function getMedicationTextarea(scroller) {
+  if (!scroller) return null;
+  const editors = scroller.querySelectorAll('textarea[data-section]');
+  for (const t of editors) if (isMedicationSectionName(t.dataset.section)) return t;
+  return null;
+}
+
+function getMedicationSectionElement(scroller) {
+  if (!scroller) return null;
+  const sections = scroller.querySelectorAll('.scribe-section[data-section]');
+  for (const s of sections) if (isMedicationSectionName(s.dataset.section)) return s;
+  return null;
+}
+
 function ensureMedicationWrap(medSection) {
-  const textarea = medSection.querySelector('textarea[data-section="Medication"]');
+  const textarea = medSection.querySelector('textarea[data-section]');
   if (!textarea) return null;
 
   let wrap = medSection.querySelector('.med-wrap');
@@ -1151,34 +1380,29 @@ function ensureMedicationWrap(medSection) {
     wrap.appendChild(textarea);
   }
 
-  // Ensure overlay exists even if wrap already created elsewhere
   let overlay = wrap.querySelector('.med-overlay');
   if (!overlay) {
     overlay = document.createElement('div');
     overlay.className = 'med-overlay';
     wrap.appendChild(overlay);
-
-    // Keep overlay scroll synced to textarea
     textarea.addEventListener('scroll', () => { overlay.scrollTop = textarea.scrollTop; });
   }
 
   return wrap;
 }
 
-// Render inline emojis line-by-line on top of the textarea (same box)
 function renderMedicationInline() {
   ensureMedStyles();
 
   const scroller = soapContainerEnsure();
-  const medSection = scroller.querySelector('.scribe-section[data-section="Medication"]');
+  const medSection = getMedicationSectionElement(scroller);
   if (!medSection) return;
 
   const wrap = ensureMedicationWrap(medSection);
-  const textarea = medSection.querySelector('textarea[data-section="Medication"]');
+  const textarea = getMedicationTextarea(scroller);
   const overlay = wrap?.querySelector('.med-overlay');
   if (!wrap || !textarea || !overlay) return;
 
-  // Mirror text metrics so overlay lines align with textarea
   const cs = getComputedStyle(textarea);
   overlay.style.padding = cs.padding;
   overlay.style.lineHeight = cs.lineHeight;
@@ -1186,7 +1410,6 @@ function renderMedicationInline() {
   overlay.style.fontFamily = cs.fontFamily;
   overlay.scrollTop = textarea.scrollTop;
 
-  // Before drawing, ensure in-memory map reflects persisted statuses if text matches
   const currentNormalized = normalizedMedicationBlock(textarea);
   const { byName, lastText } = loadMedStatus();
   if (currentNormalized === lastText) {
@@ -1199,27 +1422,23 @@ function renderMedicationInline() {
 
   for (const raw of lines) {
     const line = raw.trim();
-
     const row = document.createElement('div');
     row.className = 'med-line';
 
     const nameSpan = document.createElement('span');
     nameSpan.textContent = line;
-    // Hide duplicate text (the textarea already shows it); keep width for alignment
     nameSpan.style.color = 'transparent';
     row.appendChild(nameSpan);
 
     if (line) {
       const key = normalizeDrugKey(line);
-
       if (medAvailability.has(key)) {
         const ok = !!medAvailability.get(key);
         const badge = document.createElement('span');
-        badge.className = `med-emoji ${ok ? 'med-available' : 'med-unavailable'}`;
+        badge.className = 'med-emoji';
         badge.textContent = ok ? '✅' : '❌';
         row.appendChild(badge);
       } else if (medicationValidationPending) {
-        // If we're currently validating, show pending
         const badge = document.createElement('span');
         badge.className = 'med-emoji med-pending';
         badge.textContent = '⏳';
@@ -1233,42 +1452,46 @@ function renderMedicationInline() {
   overlay.replaceChildren(frag);
 }
 
-// Back-compat entry point (kept name so existing calls still work)
+// Back-compat
 function updateMedicationAvailabilityIndicators() {
   renderMedicationInline();
 }
 
-// ==========================
-// Signal handling (Socket.IO / BroadcastChannel)
-// ==========================
+// ====
+// Signal handling (Socket.IO / BroadcastChannel) (UPDATED: ignore cross-room BC)
+// ====
 function ingestDrugAvailabilityPayload(payload) {
   const arr = Array.isArray(payload) ? payload : (payload ? [payload] : []);
   medAvailability.clear();
+
   const newByName = {};
   for (const item of arr) {
-    const raw =
-      (item?.name ?? item?.query ?? item?.drug ?? item?.drugName ?? '').toString();
+    const raw = (item?.name ?? item?.query ?? item?.drug ?? item?.drugName ?? '').toString();
     const key = normalizeDrugKey(raw);
     if (!key) continue;
+
     const available =
       typeof item?.available === 'boolean'
         ? item.available
         : (item?.status === 'exists' || item?.status === 'available' || item?.status === true);
+
     medAvailability.set(key, !!available);
     newByName[key] = !!available;
   }
 
-  // Persist what we ingest; tie it to the current Medication block if present
   const scroller = soapContainerEnsure();
-  const medTextarea = scroller.querySelector('textarea[data-section="Medication"]');
-  const currentNormalized = normalizedMedicationBlock(medTextarea);
-  saveMedStatus(newByName, currentNormalized);
-
+  const medTextarea = getMedicationTextarea(scroller);
+  saveMedStatus(newByName, normalizedMedicationBlock(medTextarea));
   renderMedicationInline();
 }
 
 function handleSignalMessage(packet) {
   if (!packet?.type) return;
+
+  // Room isolation (from scribe.js): if message includes a roomId, ignore if not our current room
+  const msgRoom = packet.roomId ?? packet?.data?.roomId ?? packet?.data?.room ?? null;
+  if (msgRoom && !currentRoom) return;
+  if (msgRoom && currentRoom && msgRoom !== currentRoom) return;
 
   if (packet.type === 'drug_availability' || packet.type === 'drug_availability_console') {
     ingestDrugAvailabilityPayload(packet.data);
@@ -1278,6 +1501,7 @@ function handleSignalMessage(packet) {
   if (packet.type === 'transcript_console') {
     const p = packet.data || {};
     const { from, to, text = '', final = false, timestamp } = p;
+
     const key = transcriptKey(from, to);
     const slot = (transcriptState.byKey[key] ||= { partial: '', paragraph: '', flushTimer: null });
 
@@ -1294,7 +1518,11 @@ function handleSignalMessage(packet) {
     slot.flushTimer = setTimeout(() => {
       if (slot.paragraph) {
         appendTranscriptItem({ from, to, text: slot.paragraph, timestamp });
-        transcriptBC.postMessage({ type: 'transcript_console', data: { from, to, text: slot.paragraph, final: true, timestamp } });
+        transcriptBC?.postMessage?.({
+          type: 'transcript_console',
+          roomId: currentRoom,
+          data: { from, to, text: slot.paragraph, final: true, timestamp }
+        });
         slot.paragraph = '';
       }
       slot.flushTimer = null;
@@ -1303,99 +1531,182 @@ function handleSignalMessage(packet) {
     if (!soapNoteTimer) {
       soapGenerating = true;
       renderSoapNoteGenerating(0);
+
       soapNoteStartTime = Date.now();
       soapNoteTimer = setInterval(() => {
         const elapsedSec = Math.floor((Date.now() - soapNoteStartTime) / 1000);
         renderSoapNoteGenerating(elapsedSec);
       }, 1000);
     }
+
+    return;
   }
 
-  else if (packet.type === 'soap_note_console') {
+  if (packet.type === 'soap_note_console') {
     const soap = packet.data || {};
-    initializeEditMetaForSoap(soap); // new AI content -> fresh baseline and counters
-    latestSoapNote = soap; saveLatestSoap(latestSoapNote);
+    initializeEditMetaForSoap(soap);
 
-    const activeId = loadActiveItemId();
-    if (activeId) {
-      const hist = loadHistory();
-      const i = hist.findIndex(x => x.id === activeId);
-      if (i !== -1) { hist[i].soap = latestSoapNote; saveHistory(hist); }
+    // Attach this as DEFAULT note ONLY to the transcript that started the generation
+    const hist = normalizeHistoryItems(loadHistory());
+    const targetId = pendingSoapItemId || loadActiveItemId();
+    const idx = hist.findIndex(x => x.id === targetId);
+
+    if (idx !== -1) {
+      hist[idx].notes = hist[idx].notes || { default: null, templates: {} };
+      hist[idx].notes.default = soap;
+
+      // If that transcript is currently in default mode, show it immediately
+      if (hist[idx].activeTemplateId === 'default' && loadActiveItemId() === targetId) {
+        latestSoapNote = soap;
+        saveLatestSoap(latestSoapNote);
+        if (soapNoteTimer) { clearInterval(soapNoteTimer); soapNoteTimer = null; }
+        soapGenerating = false;
+        renderSoapNote(latestSoapNote);
+        syncDropdownToActiveTranscript();
+      }
+    } else {
+      // fallback: keep behavior (store as latest)
+      latestSoapNote = soap;
+      saveLatestSoap(latestSoapNote);
+      if (soapNoteTimer) { clearInterval(soapNoteTimer); soapNoteTimer = null; }
+      soapGenerating = false;
+      renderSoapNote(latestSoapNote);
     }
 
-    soapBC.postMessage({ type: 'soap_note_console', data: soap, timestamp: packet.timestamp || Date.now() });
+    saveHistory(hist);
 
-    if (soapNoteTimer) { clearInterval(soapNoteTimer); soapNoteTimer = null; }
-    soapGenerating = false;
-    renderSoapNote(latestSoapNote);
+    soapBC?.postMessage?.({ type: 'soap_note_console', roomId: currentRoom, data: soap, timestamp: packet.timestamp || Date.now() });
 
-    // IMPORTANT: Do NOT auto-call the meds API here.
-    // We only validate on user edit. If persisted statuses match current text, they will render immediately.
+    // IMPORTANT: no auto template formatting here (per your requirement: only when user selects)
+    // IMPORTANT: no auto meds API here
+    renderMedicationInline();
+
+    // Reset pending id after use (prevents accidental overwrite)
+    pendingSoapItemId = null;
   }
 }
 
-try {
-  transcriptBC.onmessage = (e) => handleSignalMessage(e.data);
-  soapBC.onmessage = (e) => handleSignalMessage(e.data);
-} catch (e) { console.warn('[SCRIBE] BroadcastChannel unavailable:', e); }
+if (transcriptBC) transcriptBC.onmessage = (e) => handleSignalMessage(e.data);
+if (soapBC) soapBC.onmessage = (e) => handleSignalMessage(e.data);
 
-// ==========================
+// ====
 // Socket.IO loader + connection
-// ==========================
+// ====
 async function loadScript(src, timeoutMs = 8000) {
   return new Promise((resolve, reject) => {
-    const s = document.createElement('script'); s.src = src; s.async = true;
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = true;
+
     let done = false;
-    const timer = setTimeout(() => { if (!done) { done = true; s.remove(); reject(new Error(`Timeout loading ${src}`)); } }, timeoutMs);
-    s.onload = () => { if (!done) { done = true; clearTimeout(timer); resolve(); } };
-    s.onerror = () => { if (!done) { done = true; clearTimeout(timer); reject(new Error(`Failed to load ${src}`)); } };
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      s.remove();
+      reject(new Error(`Timeout loading ${src}`));
+    }, timeoutMs);
+
+    s.onload = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve();
+    };
+
+    s.onerror = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      reject(new Error(`Failed to load ${src}`));
+    };
+
     document.head.appendChild(s);
   });
 }
+
 async function loadSocketIoClientFor(endpointBase) {
   if (window.io) return;
+
   const endpointClient = `${endpointBase}/socket.io/socket.io.js`;
   try {
     console.log('[SCRIBE] Trying Socket.IO client from:', endpointClient);
     await loadScript(endpointClient);
     if (window.io) return;
-  } catch (e) { console.warn('[SCRIBE] Load failed:', String(e)); }
+  } catch (e) {
+    console.warn('[SCRIBE] Load failed:', String(e));
+  }
+
   const CDN = 'https://cdn.socket.io/4.7.5/socket.io.min.js';
   console.log('[SCRIBE] Falling back to Socket.IO CDN:', CDN);
   await loadScript(CDN);
+
   if (!window.io) throw new Error('Socket.IO client not available after CDN load.');
 }
+
+/*
+ * - Stops pending flush timers
+ * - Clears transcript DOM & SOAP UI
+ * - Resets pendingSoapItemId so old room SOAP doesn't attach to new room
+ * - DOES NOT delete room storage (history stays per room key)
+ */
+function clearCockpitUiForRoomSwitch(prevRoom, nextRoom) {
+  if (prevRoom === nextRoom) return;
+
+  console.warn('[COCKPIT][ROOM][CLEAR] switching rooms', {
+    prevRoom,
+    nextRoom,
+    prevHistoryKey: prevRoom ? `scribe:${prevRoom}:history` : null,
+    nextHistoryKey: nextRoom ? `scribe:${nextRoom}:history` : null,
+    prevSoapKey: prevRoom ? `scribe:${prevRoom}:latestSoap` : null,
+    nextSoapKey: nextRoom ? `scribe:${nextRoom}:latestSoap` : null,
+  });
+
+  // stop note timer
+  try { if (soapNoteTimer) { clearInterval(soapNoteTimer); soapNoteTimer = null; } } catch {}
+  soapNoteStartTime = null;
+
+  // stop any pending transcript flush timers
+  try {
+    Object.values(transcriptState.byKey || {}).forEach(slot => {
+      try { if (slot?.flushTimer) clearTimeout(slot.flushTimer); } catch {}
+    });
+  } catch {}
+  transcriptState.byKey = {};
+
+  // wipe transcript DOM
+  try { if (transcriptEl) transcriptEl.innerHTML = ''; } catch {}
+  try { ensureTranscriptPlaceholder(); } catch {}
+
+  // wipe in-memory SOAP/transcript selection (do NOT delete room storage)
+  currentActiveItemId = null;
+  pendingSoapItemId = null;
+  latestSoapNote = {};
+  soapGenerating = false;
+
+  // clear SOAP UI to blank immediately (room isolation)
+  try { renderSoapBlank(); } catch {}
+
+  // dropdown resets visually until restore happens
+  try { if (templateSelectEl) setTemplateSelectValue('default'); } catch {}
+
+  // clear med in-memory; restore() will rehydrate from the correct room if applicable
+  try { medAvailability.clear(); } catch {}
+}
+
 function connectTo(endpointBase, onFailover) {
   return new Promise(resolve => {
-    setStatus('Connecting'); // initial pill
+    setStatus('Connecting');
     SERVER_URL = endpointBase;
 
     const opts = {
       path: '/socket.io',
       transports: ['websocket'],
       reconnection: true,
-      secure: SERVER_URL.startsWith('https://')
+      secure: SERVER_URL.startsWith('https://'),
     };
 
-    try { socket?.close(); } catch { }
+    try { socket?.close(); } catch { /* ignore */ }
     socket = window.io(SERVER_URL, opts);
-
-
-    socket.off('connect_error');
-    socket.off('disconnect');
-
-    socket.on('connect_error', err => console.warn('[SCRIBE] connect_error:', err));
-    socket.on('disconnect', (reason) => {
-      console.warn('[COCKPIT] disconnect', { reason, socketId: socket?.id, currentRoom });
-
-      const prevRoom = currentRoom;
-      currentRoom = null;
-
-      _lastReqListAt = 0;   // keep your existing throttle reset
-      clearCockpitUiForRoomSwitch(prevRoom, null);
-      showNoDevices();
-      updateConnectionStatus('disconnect');
-    });
 
     let connected = false;
     const failTimer = setTimeout(() => { if (!connected) onFailover?.(); }, 4000);
@@ -1404,18 +1715,18 @@ function connectTo(endpointBase, onFailover) {
       connected = true;
       clearTimeout(failTimer);
 
-      // ✅ Attach listeners BEFORE any requests (prevents missing first device_list)
+      // attach core listeners
       socket.off('device_list', updateDeviceList);
       socket.off('signal', handleSignalMessage);
       socket.off('room_joined');
       socket.off('peer_left');
-      socket.off('room_update');   // ✅ ADD THIS
+      socket.off('room_update');
       socket.off('telemetry_update');
 
-
-      socket.on('device_list', updateDeviceList); // renders list only (status is socket+room based)
+      socket.on('device_list', updateDeviceList);
       socket.on('signal', handleSignalMessage);
 
+      // room_update: if pairing appears, refresh device list (throttled)
       socket.on('room_update', ({ pairs } = {}) => {
         try {
           if (!COCKPIT_FOR_XR_ID) return;
@@ -1429,8 +1740,6 @@ function connectTo(endpointBase, onFailover) {
             return a === me || b === me;
           });
 
-          // ✅ When pairing appears, ask server for fresh device_list (throttled)
-          // Only do this if we are not already in a room (prevents spam)
           if (inAnyPair && !currentRoom) {
             console.log('[COCKPIT][ROOM_UPDATE] pair detected for me; requesting device_list', { me, currentRoom });
             requestDeviceListThrottled('room_update_pair_detected');
@@ -1440,21 +1749,17 @@ function connectTo(endpointBase, onFailover) {
         }
       });
 
+      // telemetry_update: bootstrap single-device visibility before pairing
       socket.on('telemetry_update', (t = {}) => {
         try {
-          // If we are not paired yet, the server might still be sending telemetry for the “primary”
-          // Use this as the bootstrap to show single-device-online without waiting for room_update.
           if (!COCKPIT_FOR_XR_ID) return;
 
           const me = String(COCKPIT_FOR_XR_ID).trim().toUpperCase();
           const xr = String(t?.xrId || '').trim().toUpperCase();
           if (!xr) return;
 
-          // Only act when telemetry belongs to the primary XR we’re “watching”
           if (xr !== me) return;
 
-          // If we're not in a room yet, ask server for authoritative list (throttled).
-          // Server may reply [] or [me]; either way, this triggers UI refresh logic.
           if (!currentRoom) {
             requestDeviceListThrottled('telemetry_bootstrap_single_device');
           }
@@ -1463,9 +1768,8 @@ function connectTo(endpointBase, onFailover) {
         }
       });
 
-
       socket.on('peer_left', ({ xrId, roomId, reason } = {}) => {
-        // Ignore peer_left for some other room (extra safety)
+        // ignore peer_left for other rooms
         if (roomId && currentRoom && roomId !== currentRoom) return;
 
         const prevRoom = currentRoom;
@@ -1473,21 +1777,14 @@ function connectTo(endpointBase, onFailover) {
 
         console.warn('[COCKPIT] peer_left', { xrId, roomId, reason, prevRoom });
 
-        // Clear room-isolated UI (transcript/SOAP) because pairing ended
         clearCockpitUiForRoomSwitch(prevRoom, null);
 
-        // Clear device list immediately (don’t wait for next device_list)
         showNoDevices();
+        updateConnectionStatus('peer_left', []);
 
-        // Status pill: socket may still be connected, but room is gone => Connecting
-        updateConnectionStatus('peer_left');
-
-        // Ask server for authoritative list (will return self-only or [])
         requestDeviceListThrottled('after_peer_left');
       });
 
-
-      // ✅ If/when server joins cockpit to pair room, re-request list to mirror XR Vision Dock
       socket.on('room_joined', ({ roomId, reason, members } = {}) => {
         const prevRoom = currentRoom;
         const nextRoom = roomId || null;
@@ -1498,52 +1795,44 @@ function connectTo(endpointBase, onFailover) {
           reason,
           members,
           socketId: socket.id,
-          cockpitForXrId: COCKPIT_FOR_XR_ID
+          cockpitForXrId: COCKPIT_FOR_XR_ID,
         });
 
-        // ✅ Always clear if switching rooms (including first join null -> room)
         clearCockpitUiForRoomSwitch(prevRoom, nextRoom);
 
-        // ✅ Set currentRoom BEFORE restore (restore reads currentRoom via loadHistory()/etc)
+        // set room before restore (restore uses currentRoom for storage keys)
         currentRoom = nextRoom;
 
-        updateConnectionStatus('room_joined');
+        updateConnectionStatus('room_joined', []);
 
-        // ✅ Restore ONLY this room’s state (or blank if none)
         try {
           restoreFromLocalStorage();
           console.debug('[COCKPIT][RESTORE] after room_joined', {
             currentRoom,
             historyCount: (loadHistory() || []).length,
-            activeId: loadActiveItemId()
+            activeId: loadActiveItemId(),
           });
         } catch (e) {
           console.warn('[COCKPIT][RESTORE] failed after room_joined', e);
         }
 
-        // ✅ Request device list ONLY when we actually have a room, and throttle to prevent spam
         if (currentRoom) {
           requestDeviceListThrottled('after_room_joined');
-        } else {
-          console.debug('[COCKPIT][REQ_LIST] skip after room_joined (not paired yet)', { reason, prevRoom, nextRoom });
         }
-
       });
 
-
-      // ✅ Identify as COCKPIT using logged-in user's mapped xrId
+      // Identify as cockpit using logged-in user's mapped xrId
       try {
         const meRes = await fetch('/api/platform/me', { credentials: 'include' });
         const me = await meRes.json();
         const xrId = (me?.xrId || me?.xr_id || '').toString().trim();
         COCKPIT_FOR_XR_ID = xrId || null;
 
-
         if (xrId) {
           socket.emit('identify', {
             xrId,
             deviceName: 'XR Dock (Scribe Cockpit)',
-            clientType: 'cockpit'
+            clientType: 'cockpit',
           });
         } else {
           console.warn('[SCRIBE] /api/platform/me returned no xrId');
@@ -1552,122 +1841,97 @@ function connectTo(endpointBase, onFailover) {
         console.warn('[SCRIBE] Failed to load /api/platform/me for identify:', e);
       }
 
-      // ✅ Always request once after identify (server will reply [] if not paired yet, or room list if paired)
+      // request list after identify (throttled)
       requestDeviceListThrottled('after_identify');
-
 
       resolve();
     });
 
+    socket.on('connect_error', err => console.warn('[SCRIBE] connect_error:', err));
+    socket.on('disconnect', (reason) => {
+      console.warn('[COCKPIT] disconnect', { reason, socketId: socket?.id, currentRoom });
 
+      const prevRoom = currentRoom;
+      currentRoom = null;
 
-  });
-}
-
-function clearCockpitUiForRoomSwitch(prevRoom, nextRoom) {
-  if (prevRoom === nextRoom) return;
-
-  console.warn('[COCKPIT][ROOM][CLEAR] switching rooms', {
-    prevRoom, nextRoom,
-    prevHistoryKey: prevRoom ? `scribe:${prevRoom}:history` : null,
-    nextHistoryKey: nextRoom ? `scribe:${nextRoom}:history` : null,
-    prevSoapKey: prevRoom ? `scribe:${prevRoom}:latestSoap` : null,
-    nextSoapKey: nextRoom ? `scribe:${nextRoom}:latestSoap` : null
-
-  });
-
-  // 1) stop any pending transcript flush timers (prevents late append from old room)
-  try {
-    Object.values(transcriptState.byKey || {}).forEach(slot => {
-      try { if (slot?.flushTimer) clearTimeout(slot.flushTimer); } catch { }
+      _lastReqListAt = 0;
+      clearCockpitUiForRoomSwitch(prevRoom, null);
+      showNoDevices();
+      updateConnectionStatus('disconnect', []);
     });
-  } catch { }
-  transcriptState.byKey = {};
-
-  // 2) wipe transcript DOM
-  try { transcriptEl.innerHTML = ''; } catch { }
-  try { ensureTranscriptPlaceholder(); } catch { }
-
-  // 3) wipe in-memory SOAP/transcript selection (do NOT delete room storage)
-  currentActiveItemId = null;
-  latestSoapNote = {};
-  soapGenerating = false;
-
-  // 4) clear SOAP UI to blank immediately (room isolation)
-  try { renderSoapBlank(); } catch { }
-
-  // 5) clear med in-memory; restore() will rehydrate from the correct room if applicable
-  try { medAvailability.clear(); } catch { }
+  });
 }
 
-
-// ==========================
+// ====
 // Restore state from localStorage
-// ==========================
+// ====
 function restoreFromLocalStorage() {
   // Transcript history
-  transcriptEl.innerHTML = '';
-  const history = loadHistory();
-  if (history.length === 0) ensureTranscriptPlaceholder();
+  if (transcriptEl) transcriptEl.innerHTML = '';
+  const hist = normalizeHistoryItems(loadHistory());
+
+  if (!hist.length) ensureTranscriptPlaceholder();
   else {
     removeTranscriptPlaceholder();
-    history.forEach(item => transcriptEl.appendChild(createTranscriptCard(item)));
+    hist.forEach(item => transcriptEl?.appendChild(createTranscriptCard(item)));
   }
 
-  // SOAP
-  latestSoapNote = loadLatestSoap();
-  const historyList = loadHistory();
-  currentActiveItemId = loadActiveItemId() || (historyList.length ? historyList[historyList.length - 1].id : '');
-  if (!currentActiveItemId && historyList.length) {
-    currentActiveItemId = historyList[historyList.length - 1].id; saveActiveItemId(currentActiveItemId);
-  }
+  // Active transcript
+  const activeId = loadActiveItemId();
+  if (!activeId && hist.length) saveActiveItemId(hist[hist.length - 1].id);
+
   highlightActiveCard();
-
   ensureTopHeadingBadge();
 
-  if (historyList.length === 0) renderSoapBlank();
-  else renderSoapNote(latestSoapNote || {});
+  // Render the active transcript's note (default/template)
+  const ctx = getActiveHistoryContext();
+  latestSoapNote = getNoteForItem(ctx.item) || loadLatestSoap() || {};
+  if (!hist.length) renderSoapBlank();
+  else renderSoapNote(latestSoapNote);
 
-  // Restore persisted med availability into memory if text matches
+  // Dropdown reflects active transcript selection
+  syncDropdownToActiveTranscript();
+
+  // Restore cached med availability if matches
   const scroller = soapContainerEnsure();
-  const medTextarea = scroller.querySelector('textarea[data-section="Medication"]');
+  const medTextarea = getMedicationTextarea(scroller);
   if (medTextarea) {
     const currentNormalized = normalizedMedicationBlock(medTextarea);
     const { byName, lastText } = loadMedStatus();
     if (currentNormalized === lastText) {
       medAvailability.clear();
       Object.entries(byName).forEach(([k, v]) => medAvailability.set(k, !!v));
-      renderMedicationInline();
     }
   }
+  renderMedicationInline();
 }
 
-// ==========================
+// ====
 // Wire HTML buttons
-// ==========================
+// ====
 function wireSoapActionButtons() {
   const scroller = soapContainerEnsure();
 
   if (clearBtnEl) {
     clearBtnEl.onclick = () => {
-      if (!hasScribeWritePermission()) {
-        notifyReadOnlyScribe();
-        return;
-      }
-
       scroller.querySelectorAll('textarea[data-section]').forEach(t => {
         t.value = '';
         autoExpandTextarea(t);
-        rebaseBoxStateToCurrent(t); // provenance -> empty baseline
+        rebaseBoxStateToCurrent(t);
         t.dataset.editCount = '0';
-        const headMeta = scroller.querySelector(`.scribe-section[data-section="${CSS.escape(t.dataset.section)}"] .scribe-section-meta`);
+
+        const headMeta = scroller.querySelector(
+          `.scribe-section[data-section="${CSS.escape(t.dataset.section)}"] .scribe-section-meta`
+        );
         if (headMeta) headMeta.textContent = `Edits: 0`;
       });
-      persistSoapFromUI();
 
-      // Clear med availability persistence since text is empty
+      persistActiveNoteFromUI();
+
+      // Clear med cache for this note text
       saveMedStatus({}, '');
       medAvailability.clear();
+      medicationValidationPending = false;
       renderMedicationInline();
 
       resetAllEditCountersToZero();
@@ -1675,61 +1939,39 @@ function wireSoapActionButtons() {
     };
   }
 
-
   if (saveBtnEl) {
     saveBtnEl.onclick = () => {
-      if (!hasScribeWritePermission()) {
-        notifyReadOnlyScribe();
-        return;
-      }
-
-      persistSoapFromUI();
+      persistActiveNoteFromUI();
       scroller.querySelectorAll('textarea[data-section]').forEach(t => rebaseBoxStateToCurrent(t));
       resetAllEditCountersToZero();
       console.log('[SCRIBE] SOAP saved and edit counters reset.');
     };
   }
 
-
   if (addEhrBtnEl) {
     addEhrBtnEl.disabled = true;
     addEhrBtnEl.classList.add('scribe-add-ehr-disabled');
     addEhrBtnEl.onclick = () => {
-      if (!hasScribeWritePermission()) {
-        notifyReadOnlyScribe();
-        return;
-      }
-
       console.log('[SCRIBE] Add EHR is disabled (placeholder).');
       scroller.querySelectorAll('textarea[data-section]').forEach(t => rebaseBoxStateToCurrent(t));
       resetAllEditCountersToZero();
     };
   }
-
 }
 
-// ==========================
+// ====
 // Boot
-// ==========================
+// ====
 (async function boot() {
   try {
+    ensureUiStyles();
+    ensureMedStyles();
+
     ensureTranscriptPlaceholder();
     showNoDevices();
 
-    ensureMedStyles();
-
-    // 1) Restore previous transcript + SOAP from localStorage
     restoreFromLocalStorage();
-
-    // 2) Load XR Dock / Scribe Cockpit permissions, then lock UI if READ-only
-    await loadDockPermissions();
-    applyScribeReadOnlyUI();
-
-    // 3) Wire buttons (they will also guard writes at click time)
     wireSoapActionButtons();
-
-    // Initial draw for medication overlay (uses persisted statuses if available)
-    renderMedicationInline();
 
     await loadSocketIoClientFor(preferred);
     await connectTo(preferred, async () => {
@@ -1737,23 +1979,360 @@ function wireSoapActionButtons() {
       await connectTo(fallback);
     });
 
+    await initTemplateDropdown();
+
     console.log('[SCRIBE] Cockpit booted successfully');
   } catch (e) {
     console.error('[SCRIBE] Failed to initialize:', e);
     setStatus('Disconnected');
     if (deviceListEl) {
-      deviceListEl.innerHTML = `<li class="text-red-400">Could not initialize cockpit. Ensure your signaling server is live: ${isLocal ? 'NGROK' : 'AZURE'}</li>`;
+      deviceListEl.innerHTML = `<li class="text-red-400">Could not initialize cockpit. Ensure your signaling server is live (${isLocal ? 'local' : 'production'}).</li>`;
     }
   }
 })();
 
-
-
-// ==========================
+// ====
 // Helpers
-// ==========================
+// ====
 function escapeHtml(str) {
   return String(str || '')
-    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;').replaceAll("'", "&#039;");
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+// ====
+// EHR Integration (MRN -> Clinical Notes by short_name)
+// Summary always first
+// ====
+
+const ehrButton = document.getElementById('ehrButton');
+const ehrSidebar = document.getElementById('ehrSidebar');
+const ehrOverlay = document.getElementById('ehrOverlay');
+const ehrCloseButton = document.getElementById('ehrCloseButton');
+
+const mrnInput = document.getElementById('mrnInput');
+const mrnSearchButton = document.getElementById('mrnSearchButton');
+
+const ehrError = document.getElementById('ehrError');
+const ehrInitialState = document.getElementById('ehrInitialState');
+const ehrPatientState = document.getElementById('ehrPatientState');
+
+const patientNameDisplay = document.getElementById('patientNameDisplay');
+const patientMRNDisplay = document.getElementById('patientMRNDisplay');
+const patientEmailDisplay = document.getElementById('patientEmailDisplay');
+const patientMobileDisplay = document.getElementById('patientMobileDisplay');
+
+const notesList = document.getElementById('notesList');
+const noteDetail = document.getElementById('noteDetail');
+
+let currentPatient = null;
+let currentNotes = [];
+
+// NOTE CACHE (noteId → API response)
+const noteCache = new Map();
+
+const SUMMARY_NOTE_ID = 'summary';
+
+
+/* ====
+    ADDITION: Session persistence helpers (NO LOGIC CHANGE)
+==== */
+
+const EHR_STORAGE_KEY = 'ehr_state_v1';
+
+function persistEHRState() {
+  sessionStorage.setItem(EHR_STORAGE_KEY, JSON.stringify({
+    currentPatient,
+    currentNotes,
+    activeNoteId:
+      document.querySelector('.ehr-note-item.active')?.dataset?.noteId
+      || SUMMARY_NOTE_ID,
+    noteCache: [...noteCache.entries()]
+  }));
+}
+
+function restoreEHRState() {
+  const raw = sessionStorage.getItem(EHR_STORAGE_KEY);
+  if (!raw) return;
+
+  const state = JSON.parse(raw);
+
+  // ✅ ADDITION: if no valid patient or notes, reset to MRN entry flow
+  if (!state.currentPatient || !state.currentNotes || state.currentNotes.length === 0) {
+    sessionStorage.removeItem(EHR_STORAGE_KEY);
+    resetEHRState();
+    return;
+  }
+
+  currentPatient = state.currentPatient;
+  currentNotes = state.currentNotes || [];
+
+  state.noteCache?.forEach(([k, v]) => noteCache.set(k, v));
+
+  renderPatient(currentPatient);
+  renderClinicalNotes(currentNotes);
+
+  const activeId = state.activeNoteId || SUMMARY_NOTE_ID;
+
+  setActiveNote(activeId);
+
+  // Restore content exactly as before refresh
+  if (activeId === SUMMARY_NOTE_ID) {
+    loadSummary();
+  } else {
+    loadNote(activeId);
+  }
+}
+
+
+window.addEventListener('beforeunload', persistEHRState);
+window.addEventListener('load', restoreEHRState);
+
+
+window.addEventListener('beforeunload', persistEHRState);
+window.addEventListener('load', restoreEHRState);
+
+// ---- UI helpers ----
+function escapeHtml(str) {
+  return String(str ?? 'N/A')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
+}
+
+function fmtDate(dt) {
+  if (!dt) return 'N/A';
+  const d = new Date(dt);
+  return isNaN(d.getTime()) ? 'N/A' : d.toLocaleDateString();
+}
+
+// ---- API helper ----
+async function apiGetJson(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Request failed (${res.status})`);
+  return res.json();
+}
+
+// ---- Sidebar ----
+ehrButton.onclick = () => {
+  ehrSidebar.classList.add('active');
+  ehrOverlay.classList.add('active');
+};
+
+// Overlay click: ONLY close sidebar (NO RESET)
+ehrOverlay.onclick = () => {
+  ehrSidebar.classList.remove('active');
+  ehrOverlay.classList.remove('active');
+};
+
+// Cancel button: FULL RESET
+ehrCloseButton.onclick = () => {
+  sessionStorage.removeItem(EHR_STORAGE_KEY); 
+  resetEHRState();
+};
+
+// ---- RESET EVERYTHING ----
+function resetEHRState() {
+  ehrSidebar.classList.remove('active');
+  ehrOverlay.classList.remove('active');
+
+  ehrInitialState.style.display = 'flex';
+  ehrPatientState.style.display = 'none';
+
+  mrnInput.value = '';
+  ehrError.style.display = 'none';
+
+  notesList.innerHTML = '';
+  noteDetail.innerHTML = '';
+
+  currentPatient = null;
+  currentNotes = [];
+
+  // CLEAR CACHE (ONLY here + new MRN)
+  noteCache.clear();
+}
+
+// ---- MRN Search ----
+async function searchMRN() {
+  const mrn = mrnInput.value.trim();
+  if (!mrn) return;
+
+  ehrError.style.display = 'none';
+  mrnSearchButton.disabled = true;
+  mrnSearchButton.textContent = 'Searching...';
+
+  // ✅ CLEAR CACHE ON NEW MRN
+  noteCache.clear();
+  sessionStorage.removeItem(EHR_STORAGE_KEY); 
+
+  try {
+    const data = await apiGetJson(`${SERVER_URL}/ehr/patient/${encodeURIComponent(mrn)}`);
+
+    currentPatient = data.patient || {};
+    currentNotes = (data.notes || []).map(n => ({
+      note_id: n.note_id ?? n.patient_note_id,
+      short_name: n.short_name,
+      template: n.template,
+      document_created_date: n.document_created_date
+    }));
+
+    renderPatient(currentPatient);
+    renderClinicalNotes(currentNotes);
+
+    noteDetail.innerHTML =
+      `<div class="text-gray-400 text-sm">Select a note to view details</div>`;
+  } catch (e) {
+    ehrError.textContent = e.message;
+    ehrError.style.display = 'block';
+  } finally {
+    mrnSearchButton.disabled = false;
+    mrnSearchButton.textContent = 'Search';
+  }
+}
+
+mrnSearchButton.onclick = searchMRN;
+mrnInput.addEventListener('keypress', e => e.key === 'Enter' && searchMRN());
+
+// ---- Render Patient ----
+function renderPatient(p) {
+  ehrInitialState.style.display = 'none';
+  ehrPatientState.style.display = 'flex';
+
+  patientNameDisplay.textContent = p.full_name || 'N/A';
+  patientMRNDisplay.textContent = p.mrn_no || 'N/A';
+  patientEmailDisplay.textContent = p.email || 'N/A';
+  if (patientMobileDisplay) patientMobileDisplay.textContent = p.mobile || 'N/A';
+}
+
+// ---- Clinical Notes List ----
+function renderClinicalNotes(notes) {
+  notesList.innerHTML = '';
+  notesList.classList.add('ehr-notes-scroll'); // IMPORTANT
+
+  const summary = document.createElement('div');
+  summary.className = 'ehr-note-item';
+  summary.textContent = 'Summary';
+  summary.onclick = () => {
+    setActiveNote(SUMMARY_NOTE_ID);
+    loadSummary();
+  };
+  notesList.appendChild(summary);
+
+  notes.forEach(note => {
+    const item = document.createElement('div');
+    item.className = 'ehr-note-item';
+    item.dataset.noteId = note.note_id;
+    item.title = note.short_name; // tooltip for long names
+    item.textContent = note.short_name;
+
+    item.onclick = () => {
+      setActiveNote(note.note_id);
+      loadNote(note.note_id);
+    };
+
+    notesList.appendChild(item);
+  });
+}
+
+// ---- Active Highlight ----
+function setActiveNote(noteId) {
+  document.querySelectorAll('.ehr-note-item')
+    .forEach(el => el.classList.remove('active'));
+
+  const active = [...document.querySelectorAll('.ehr-note-item')]
+    .find(el =>
+      el.dataset.noteId == noteId ||
+      (noteId === SUMMARY_NOTE_ID && el.textContent === 'Summary')
+    );
+
+  if (active) active.classList.add('active');
+}
+
+// ---- Load Single Note (CACHED) ----
+async function loadNote(noteId) {
+  noteDetail.innerHTML = `<div class="text-gray-400 text-sm">Loading...</div>`;
+
+  if (noteCache.has(noteId)) {
+    const cached = noteCache.get(noteId);
+    renderNoteDetail(
+      cached.note.template,
+      cached.note.document_created_date,
+      cached.sections,
+      false
+    );
+    return;
+  }
+
+  try {
+    const data = await apiGetJson(`${SERVER_URL}/ehr/notes/${noteId}`);
+    noteCache.set(noteId, data);
+
+    renderNoteDetail(
+      data.note?.template || 'Clinical Note',
+      data.note?.document_created_date,
+      data.sections || [],
+      false
+    );
+  } catch {
+    noteDetail.innerHTML =
+      `<div class="text-red-500 text-sm">Failed to load note</div>`;
+  }
+}
+
+// ---- Summary ----
+async function loadSummary() {
+  noteDetail.innerHTML =
+    `<div class="text-gray-400 text-sm">Generating summary...</div>`;
+
+  const res = await fetch(`${SERVER_URL}/ehr/ai/summary`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mrn: currentPatient?.mrn_no })
+  });
+
+  const data = await res.json();
+
+  renderNoteDetail(
+    data.template_title || 'AI Summary',
+    data.document_created_date,
+    data.sections || [],
+    true
+  );
+}
+
+// ---- Render Note Detail ----
+function renderNoteDetail(template, createdDate, sections, isSummary) {
+  let html = '';
+
+  if (!isSummary) {
+    html += `
+      <div style="font-size:12px;font-weight:600;margin-bottom:12px;">
+        DATE: ${escapeHtml(fmtDate(createdDate))}
+      </div>
+    `;
+  }
+
+  html += `
+    <div style="text-align:center;font-size:18px;font-weight:800;margin-top:22px;margin-bottom:20px;">
+      ${escapeHtml(template)}
+    </div>
+  `;
+
+  sections.forEach(s => {
+    html += `
+      <div style="margin-bottom:18px;">
+        <div style="font-weight:700;margin-bottom:6px;">
+          ${escapeHtml(s.component)}
+        </div>
+        <div>${escapeHtml(s.text || 'N/A')}</div>
+      </div>
+    `;
+  });
+
+  noteDetail.innerHTML = html;
 }
