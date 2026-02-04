@@ -711,10 +711,34 @@ function initSocket() {
     // --- your existing handlers ---
     socket.on('signal', handleSignalMessage);
     socket.on('message', handleChatMessage);
-    socket.on('device_list', (devices) => {
+    socket.on('device_list', (payload = []) => {
+        // Support BOTH shapes:
+        // 1) legacy: payload = [{xrId,...}, ...]
+        // 2) new:    payload = { roomId, devices: [{xrId,...}, ...] }
+
+        const isLegacy = Array.isArray(payload);
+        const roomIdFromPayload = isLegacy
+            ? null
+            : (typeof payload?.roomId === 'string' ? payload.roomId : null);
+
+        const devices = isLegacy
+            ? payload
+            : (Array.isArray(payload?.devices) ? payload.devices : []);
+
+        // Ignore device_list for other rooms (prevents overwriting UI during reconnect races)
+        if (roomIdFromPayload && currentRoom && roomIdFromPayload !== currentRoom) {
+            console.log('[SOCKET] device_list ignored (wrong room)', {
+                currentRoom,
+                roomIdFromPayload,
+                len: devices.length
+            });
+            return;
+        }
+
         console.log('[SOCKET] device_list event received', {
             currentRoom,
-            len: Array.isArray(devices) ? devices.length : null
+            roomIdFromPayload,
+            len:devices.length 
         });
         updateDeviceList(devices);
     });

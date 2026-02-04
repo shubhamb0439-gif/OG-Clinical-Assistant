@@ -353,6 +353,8 @@ function showNoDevices() {
   li.textContent = 'No devices online';
   deviceListEl.appendChild(li);
 }
+// ✅ ADD THIS LINE HERE
+let pendingEmptyDeviceListTimer = null;
 
 function updateDeviceList(payload) {
   const devices = Array.isArray(payload)
@@ -363,13 +365,24 @@ function updateDeviceList(payload) {
 
   if (!deviceListEl) return;
 
+  // Cancel pending empty render if a new update arrives
+  if (pendingEmptyDeviceListTimer) {
+    clearTimeout(pendingEmptyDeviceListTimer);
+    pendingEmptyDeviceListTimer = null;
+  }
+
   deviceListEl.innerHTML = '';
 
   if (devices.length === 0) {
-    showNoDevices();
-    updateConnectionStatus('device_list', devices);
+    // Delay rendering empty to avoid flicker from transient races
+    pendingEmptyDeviceListTimer = setTimeout(() => {
+      showNoDevices();
+      updateConnectionStatus('device_list', []);
+      pendingEmptyDeviceListTimer = null;
+    }, 800);
     return;
   }
+
 
   devices.forEach(d => {
     const name = d?.deviceName || d?.name || (d?.xrId ? `Device (${d.xrId})` : 'Unknown');
@@ -551,7 +564,7 @@ function stopSoapGenerationTimer() {
       clearInterval(soapNoteTimer);
       soapNoteTimer = null;
     }
-  } catch {}
+  } catch { }
   soapNoteStartTime = null;
 }
 
@@ -1635,62 +1648,62 @@ function handleSignalMessage(packet) {
     return;
   }
 
- if (packet.type === 'soap_note_console') {
-  const soap = packet.data || {};
-  initializeEditMetaForSoap(soap);
+  if (packet.type === 'soap_note_console') {
+    const soap = packet.data || {};
+    initializeEditMetaForSoap(soap);
 
-  const hist = normalizeHistoryItems(loadHistory());
+    const hist = normalizeHistoryItems(loadHistory());
 
-  // Bind to correct transcript via FIFO
-  const targetId = pendingSoapItemQueue.length
-    ? pendingSoapItemQueue.shift()
-    : loadActiveItemId();
+    // Bind to correct transcript via FIFO
+    const targetId = pendingSoapItemQueue.length
+      ? pendingSoapItemQueue.shift()
+      : loadActiveItemId();
 
-  const idx = hist.findIndex(x => x.id === targetId);
+    const idx = hist.findIndex(x => x.id === targetId);
 
-  if (idx !== -1) {
-    hist[idx].notes = hist[idx].notes || { default: null, templates: {} };
-    hist[idx].notes.default = soap;
+    if (idx !== -1) {
+      hist[idx].notes = hist[idx].notes || { default: null, templates: {} };
+      hist[idx].notes.default = soap;
+    }
+
+    saveHistory(hist);
+
+    // Decide whether we should render this SOAP now (only if active + default)
+    const activeId = loadActiveItemId();
+    const isActive = activeId === targetId;
+    const isDefault =
+      idx !== -1
+        ? String(hist[idx].activeTemplateId || 'default') === 'default'
+        : true;
+
+    // CRITICAL FIX:
+    // Stop the timer + flip soapGenerating OFF BEFORE rendering,
+    // otherwise renderSoapNote() early-returns and note never shows.
+    stopSoapGenerationTimer();
+    soapGenerating = false;
+
+    if (isActive && isDefault) {
+      latestSoapNote = soap;
+      saveLatestSoap(latestSoapNote);
+      renderSoapNote(latestSoapNote);
+      syncDropdownToActiveTranscript();
+    } else {
+      // If not rendering now, keep latestSoapNote as the currently active note
+      // (avoid UI jumping to non-active transcript's note)
+      const ctx = getActiveHistoryContext();
+      latestSoapNote = getNoteForItem(ctx.item) || loadLatestSoap() || {};
+      saveLatestSoap(latestSoapNote);
+    }
+
+    // Restart timer ONLY if the ACTIVE transcript is still waiting in queue
+    if (pendingSoapItemQueue.includes(activeId)) {
+      startSoapGenerationTimer('default_next');
+    }
+
+    // IMPORTANT: do not auto-call meds API; just render from cache if present
+    renderMedicationInline();
+    return;
   }
-
-  saveHistory(hist);
-
-  // Decide whether we should render this SOAP now (only if active + default)
-  const activeId = loadActiveItemId();
-  const isActive = activeId === targetId;
-  const isDefault =
-    idx !== -1
-      ? String(hist[idx].activeTemplateId || 'default') === 'default'
-      : true;
-
-  // CRITICAL FIX:
-  // Stop the timer + flip soapGenerating OFF BEFORE rendering,
-  // otherwise renderSoapNote() early-returns and note never shows.
-  stopSoapGenerationTimer();
-  soapGenerating = false;
-
-  if (isActive && isDefault) {
-    latestSoapNote = soap;
-    saveLatestSoap(latestSoapNote);
-    renderSoapNote(latestSoapNote);
-    syncDropdownToActiveTranscript();
-  } else {
-    // If not rendering now, keep latestSoapNote as the currently active note
-    // (avoid UI jumping to non-active transcript's note)
-    const ctx = getActiveHistoryContext();
-    latestSoapNote = getNoteForItem(ctx.item) || loadLatestSoap() || {};
-    saveLatestSoap(latestSoapNote);
-  }
-
-  // Restart timer ONLY if the ACTIVE transcript is still waiting in queue
-  if (pendingSoapItemQueue.includes(activeId)) {
-    startSoapGenerationTimer('default_next');
-  }
-
-  // IMPORTANT: do not auto-call meds API; just render from cache if present
-  renderMedicationInline();
-  return;
-}
 
 }
 
@@ -1767,14 +1780,14 @@ function clearCockpitUiForRoomSwitch(prevRoom, nextRoom) {
   // stop any pending transcript flush timers
   try {
     Object.values(transcriptState.byKey || {}).forEach(slot => {
-      try { if (slot?.flushTimer) clearTimeout(slot.flushTimer); } catch {}
+      try { if (slot?.flushTimer) clearTimeout(slot.flushTimer); } catch { }
     });
-  } catch {}
+  } catch { }
   transcriptState.byKey = {};
 
   // wipe transcript DOM
-  try { if (transcriptEl) transcriptEl.innerHTML = ''; } catch {}
-  try { ensureTranscriptPlaceholder(); } catch {}
+  try { if (transcriptEl) transcriptEl.innerHTML = ''; } catch { }
+  try { ensureTranscriptPlaceholder(); } catch { }
 
   // wipe in-memory selection + pending queue
   currentActiveItemId = null;
@@ -1782,13 +1795,13 @@ function clearCockpitUiForRoomSwitch(prevRoom, nextRoom) {
   latestSoapNote = {};
 
   // clear SOAP UI
-  try { renderSoapBlank(); } catch {}
+  try { renderSoapBlank(); } catch { }
 
   // dropdown resets visually until restore
-  try { if (templateSelectEl) setTemplateSelectValue('default'); } catch {}
+  try { if (templateSelectEl) setTemplateSelectValue('default'); } catch { }
 
   // clear med in-memory; restore() will rehydrate if matching cached text
-  try { medAvailability.clear(); } catch {}
+  try { medAvailability.clear(); } catch { }
   medicationValidationPending = false;
 }
 
@@ -1807,7 +1820,7 @@ function connectTo(endpointBase, onFailover) {
     // stop poller for old socket before swapping
     stopDeviceListWatchdog();
 
-    try { socket?.close(); } catch {}
+    try { socket?.close(); } catch { }
 
     socket = window.io(SERVER_URL, opts);
 
