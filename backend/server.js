@@ -1546,6 +1546,7 @@ app.post("/api/notes/generate", async (req, res) => {
     return res.status(500).json({ error: "Failed to generate note" });
   }
 });
+
 app.get('/ehr/patient/:mrn', async (req, res) => {
   dlog('[EHR_API] /ehr/patient/:mrn request received');
 
@@ -1686,7 +1687,126 @@ app.get('/ehr/notes/:noteId', async (req, res) => {
     });
   }
 });
+// ============================================================================
+// ADDED: Template Driven Note → Add to EHR save endpoint
+// - Inserts Patient_Notes then Patient_Note_Content in one transaction
+// - Called by cockpit "Add to EHR" (template-driven notes only)
+// - MRN is dynamic (sent from frontend in payload) 
+// ============================================================================
+app.post('/ehr/patient_notes/template', async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const body = req.body || {};
 
+    // Expected payload shape (built in scribe_cockpit.js):
+    // {
+    //   patient_notes: { patient_id, doctor_id, document_created_date, created_by, modified_by, modified_date, row_status },
+    //   patient_note_content: [{ template_component_mapping_id, text, edit_count, created_by, modified_by, created_date, modified_date, row_status }, ...]
+    // }
+
+    const pn = body.patient_notes || null;
+    const rows = Array.isArray(body.patient_note_content) ? body.patient_note_content : [];
+
+    if (!pn) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, message: 'Missing patient_notes' });
+    }
+    if (!pn.patient_id) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, message: 'Missing patient_notes.patient_id' });
+    }
+    if (!pn.doctor_id) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, message: 'Missing patient_notes.doctor_id' });
+    }
+    if (!pn.created_by) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, message: 'Missing patient_notes.created_by' });
+    }
+    if (!pn.modified_by) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, message: 'Missing patient_notes.modified_by' });
+    }
+    if (!pn.document_created_date) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, message: 'Missing patient_notes.document_created_date' });
+    }
+    if (!pn.modified_date) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, message: 'Missing patient_notes.modified_date' });
+    }
+    if (!rows.length) {
+      await t.rollback();
+      return res.status(400).json({ ok: false, message: 'Missing patient_note_content rows' });
+    }
+    const insertPatientNotesSql = `
+      INSERT INTO Patient_Notes
+        (patient_id, doctor_id, created_date, created_by, modified_date, modified_by, row_status)
+      OUTPUT INSERTED.id AS patient_note_id
+      VALUES
+        (:patient_id, :doctor_id, :created_date, :created_by, :modified_date, :modified_by, :row_status)
+    `;
+
+    const inserted = await sequelize.query(insertPatientNotesSql, {
+      replacements: {
+        patient_id: pn.patient_id,
+        doctor_id: pn.doctor_id,
+        created_date: pn.document_created_date,
+        created_by: pn.created_by,
+        modified_date: pn.modified_date,
+        modified_by: pn.modified_by,
+        row_status: pn.row_status ?? 1,
+      },
+      type: Sequelize.QueryTypes.SELECT,
+      transaction: t,
+    });
+
+    const patientNoteId = inserted?.[0]?.patient_note_id ?? null;
+    if (!patientNoteId) {
+      await t.rollback();
+      return res.status(500).json({ ok: false, message: 'Failed to create Patient_Notes row (no id returned)' });
+    }
+
+    // 2) Insert Patient_Note_Content rows (row-by-row, minimal + safe)
+    const insertContentSql = `
+      INSERT INTO Patient_Note_Content
+        (patient_note_id, template_component_mapping_id, text, edit_count, created_date, created_by, modified_date, modified_by, row_status)
+      VALUES
+        (:patient_note_id, :template_component_mapping_id, :text, :edit_count, :created_date, :created_by, :modified_date, :modified_by, :row_status)
+    `;
+
+    for (const r of rows) {
+      const mappingId = r?.template_component_mapping_id ?? null;
+      if (!mappingId) {
+        await t.rollback();
+        return res.status(400).json({ ok: false, message: 'Missing template_component_mapping_id in a content row' });
+      }
+
+      await sequelize.query(insertContentSql, {
+        replacements: {
+          patient_note_id: patientNoteId,
+          template_component_mapping_id: mappingId,
+          text: String(r?.text ?? ''),
+          edit_count: (r?.edit_count ?? 0),
+          created_date: r?.created_date ?? pn.document_created_date,
+          created_by: r?.created_by ?? pn.created_by,
+          modified_date: r?.modified_date ?? pn.modified_date,
+          modified_by: r?.modified_by ?? pn.modified_by,
+          row_status: r?.row_status ?? 1,
+        },
+        type: Sequelize.QueryTypes.INSERT,
+        transaction: t,
+      });
+    }
+
+    await t.commit();
+    return res.json({ ok: true, patient_note_id: patientNoteId });
+  } catch (e) {
+    try { await t.rollback(); } catch { }
+    console.error('[EHR][TEMPLATE_SAVE] failed:', e);
+    return res.status(500).json({ ok: false, message: String(e?.message || e || 'Save failed') });
+  }
+});
 
 app.post('/ehr/ai/summary', async (req, res) => {
   try {
@@ -2165,10 +2285,32 @@ app.post('/api/platform/login', async (req, res) => {
 
 
 
+app.get('/api/platform/me', async (req, res) => {
+  try {
+    if (!(req.session && req.session.user)) return res.json({ ok: false });
 
-app.get('/api/platform/me', (req, res) => {
-  if (req.session && req.session.user) {
     const u = req.session.user;
+
+    // Fetch latest active mapping row where user is either side
+    const rows = await sequelize.query(
+      `
+      SELECT TOP 1
+        id AS mappingId,
+        scribe_user_id AS scribeId,
+        provider_user_id AS doctorId
+      FROM Scribe_Provider_Mapping
+      WHERE row_status = 1
+        AND (:uid IN (scribe_user_id, provider_user_id))
+      ORDER BY id DESC
+      `,
+      {
+        replacements: { uid: u.id },
+        type: Sequelize.QueryTypes.SELECT,
+      }
+    );
+
+    const map = rows?.[0] || null;
+
     return res.json({
       ok: true,
       role: u.role,
@@ -2178,16 +2320,23 @@ app.get('/api/platform/me', (req, res) => {
       userType: u.userType || u.type,
       id: u.id,
 
-      // ✅ add these (safe)
+      // existing safe extras
       userRoleMappingId: u.userRoleMappingId,
       xrId: u.xrId,
       clinicId: u.clinicId,
       managerUserId: u.managerUserId,
       department: u.department,
       persona: u.persona,
+
+      // ✅ NEW: pair identity for note saving
+      mappingId: map?.mappingId ?? null,
+      doctorId: map?.doctorId ?? null,
+      scribeId: map?.scribeId ?? null,
     });
+  } catch (err) {
+    console.error('[ME] error:', err);
+    return res.status(500).json({ ok: false, message: 'Internal error' });
   }
-  return res.json({ ok: false });
 });
 
 
@@ -4252,7 +4401,6 @@ async function generateSoapNote(transcript, templateId = null) {
       return Number.isFinite(n) && n > 0 ? n : null;
     })();
 
-    // 1) Decide section list (default vs DB template)
     const defaultSections = [
       "Chief Complaints",
       "History of Present Illness",
@@ -4266,8 +4414,11 @@ async function generateSoapNote(transcript, templateId = null) {
     let sections = defaultSections;
     let templateMeta = null;
 
+    // ONLY used for template-driven
+    let sectionToMappingId = {};
+    let orderedComponentRows = [];
+
     if (tplId) {
-      // Template meta
       const templateRows = await sequelize.query(
         `
         SELECT TOP 1 id, template AS name, short_name
@@ -4277,44 +4428,53 @@ async function generateSoapNote(transcript, templateId = null) {
         { replacements: { templateId: tplId }, type: Sequelize.QueryTypes.SELECT }
       );
 
-      // Ordered components by position
+      // ✅ Use your view to get mapping_id
       const components = await sequelize.query(
         `
-        SELECT c.component AS name, m.position
-        FROM [dbo].[Template_Component_Mapping] m
-        JOIN [dbo].[Components] c ON c.id = m.component_id
-        WHERE m.template_id = :templateId
-          AND m.row_status = 1
-          AND c.row_status = 1
-        ORDER BY m.position ASC;
+        SELECT
+          v.mapping_id,
+          v.component AS name,
+          v.position
+        FROM [dbo].[View_Template_Component_Mapping] v
+        WHERE v.template_id = :templateId
+          AND v.row_status = 1
+        ORDER BY v.position ASC;
         `,
         { replacements: { templateId: tplId }, type: Sequelize.QueryTypes.SELECT }
       );
 
-      // Use template only if valid + has components, else fallback to default
       if (templateRows.length && components.length) {
         const seen = new Set();
-        const dbSections = components
-          .map(x => String(x.name || "").trim())
-          .filter(Boolean)
-          .filter(s => (seen.has(s) ? false : (seen.add(s), true)));
+        orderedComponentRows = components
+          .map(r => ({
+            mapping_id: Number(r.mapping_id),
+            name: String(r.name || "").trim(),
+            position: Number(r.position ?? 0),
+          }))
+          .filter(r => Number.isFinite(r.mapping_id) && r.mapping_id > 0)
+          .filter(r => r.name)
+          .filter(r => (seen.has(r.name) ? false : (seen.add(r.name), true)));
 
-        if (dbSections.length) {
-          sections = dbSections;
+        if (orderedComponentRows.length) {
+          sections = orderedComponentRows.map(r => r.name);
+
+          sectionToMappingId = {};
+          for (const r of orderedComponentRows) sectionToMappingId[r.name] = r.mapping_id;
+
           templateMeta = {
             templateId: templateRows[0].id,
             templateName: templateRows[0].name,
             short_name: templateRows[0].short_name || null,
-            components: components.map(c => ({
-              name: c.name,
-              position: Number(c.position ?? 0),
+            components: orderedComponentRows.map(r => ({
+              mapping_id: r.mapping_id,
+              name: r.name,
+              position: r.position,
             })),
           };
         }
       }
     }
 
-    // 2) Standard strict prompt (no hallucination)
     const sectionListText = sections.map(s => `- ${s}`).join("\n");
 
     const prompt = `
@@ -4340,7 +4500,6 @@ TRANSCRIPT (raw):
 ${text}
     `.trim();
 
-    // 3) Abacus RouteLLM call
     const ABACUS_API_KEY = process.env.ABACUS_API_KEY;
     if (!ABACUS_API_KEY) throw new Error("Missing ABACUS_API_KEY");
 
@@ -4361,7 +4520,6 @@ ${text}
       }
     );
 
-    // 4) Parse JSON safely
     let raw = response?.data?.choices?.[0]?.message?.content || "{}";
     raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
 
@@ -4375,7 +4533,6 @@ ${text}
       else throw e;
     }
 
-    // 5) Normalize: ensure all sections exist
     const note = {};
     for (const s of sections) {
       const v = parsed?.[s];
@@ -4390,13 +4547,37 @@ ${text}
       }
     }
 
-    if (templateMeta) note._templateMeta = templateMeta;
+    // ✅ ONLY for template-driven: attach mapping info
+    if (templateMeta) {
+      note._templateMeta = templateMeta;
+
+      // mapping for saving
+      note._templateComponentMappingIds = sectionToMappingId;
+
+      // convenience rows (optional)
+      note._rowsForPatientNoteInsert = sections.map((sectionName, idx) => {
+        const mappingId = sectionToMappingId?.[sectionName] ?? null;
+        const value = note[sectionName];
+        const textValue =
+          Array.isArray(value) ? value.join("\n") : String(value || "Not mentioned in transcript");
+
+        return {
+          template_component_mapping_id: mappingId,
+          component: sectionName,
+          position: idx + 1,
+          text: textValue,
+        };
+      });
+    }
+
+    //  Default SOAP: returns only note sections (no mapping fields)
     return note;
   } catch (err) {
     console.error("[SOAP_NOTE] generation failed:", err?.message || err);
     return { Error: ["Error generating note"] };
   }
 }
+
 
 // Parse Medication from SOAP note, check dbo.DrugMaster.drug, and log availability
 async function checkSoapMedicationAvailability(soapNote, opts = {}) {
@@ -4914,7 +5095,7 @@ io.on('connection', (socket) => {
   });
 
 
-//------------changes made regarding dashabord ***----------------------------------------------------------------
+  //------------changes made regarding dashabord ***----------------------------------------------------------------
   socket.on('dashboard_subscribe_pairs', async ({ roomIds } = {}) => {
     if (socket.data?.clientType !== 'dashboard') return;
 
@@ -4940,149 +5121,131 @@ io.on('connection', (socket) => {
     dlog('[DASHBOARD] subscribed rooms', { socketId: socket.id, count: safeRooms.length });
   });
 
-// -------- request_device_list --------
-socket.on('request_device_list', async () => {
-  dlog('[EVENT] request_device_list');
-  try {
-    const roomId = socket.data?.roomId;
+  // -------- request_device_list --------
+  socket.on('request_device_list', async () => {
+    dlog('[EVENT] request_device_list');
+    try {
+      const roomId = socket.data?.roomId;
 
-    // prevents spamming room_joined/device_list on every watchdog tick
-    if (socket.data._lastRoomJoined === undefined) socket.data._lastRoomJoined = '__init__';
-    if (socket.data._lastDeviceListSig === undefined) socket.data._lastDeviceListSig = '__init__';
+      // prevents spamming room_joined/device_list on every watchdog tick
+      if (socket.data._lastRoomJoined === undefined) socket.data._lastRoomJoined = '__init__';
+      if (socket.data._lastDeviceListSig === undefined) socket.data._lastDeviceListSig = '__init__';
 
-    // ✅ Cockpit VIEW-ONLY
-    if (socket.data?.clientType === 'cockpit' && !roomId) {
-      const target = normXr(socket.data?.cockpitForXrId);
-      dlog('[COCKPIT][REQ_LIST] no room yet, attempting join', { socketId: socket.id, target });
+      // ✅ Cockpit VIEW-ONLY
+      if (socket.data?.clientType === 'cockpit' && !roomId) {
+        const target = normXr(socket.data?.cockpitForXrId);
+        dlog('[COCKPIT][REQ_LIST] no room yet, attempting join', { socketId: socket.id, target });
 
-      if (target) {
-        const primary = await getClientSocketByXrIdCI_Cluster(target, socket);
-        const primaryLocal = clients?.get?.(target) || null;
-        const primaryFinal = primary || primaryLocal;
+        if (target) {
+          const primary = await getClientSocketByXrIdCI_Cluster(target, socket);
+          const primaryLocal = clients?.get?.(target) || null;
+          const primaryFinal = primary || primaryLocal;
 
-        const targetRoom = primaryFinal?.data?.roomId || null;
+          const targetRoom = primaryFinal?.data?.roomId || null;
 
-        dlog('[COCKPIT][REQ_LIST] primary lookup (cluster+local)', {
-          socketId: socket.id,
-          target,
-          primarySocketId: primaryFinal?.id || null,
-          targetRoom,
-          usedLocalFallback: !!(!primary && primaryLocal)
-        });
+          dlog('[COCKPIT][REQ_LIST] primary lookup (cluster+local)', {
+            socketId: socket.id,
+            target,
+            primarySocketId: primaryFinal?.id || null,
+            targetRoom,
+            usedLocalFallback: !!(!primary && primaryLocal)
+          });
 
-        // ✅ CASE 1: target paired → join room
-        if (targetRoom) {
-          try {
-            await socket.join(targetRoom);
-            socket.data.roomId = targetRoom;
+          // ✅ CASE 1: target paired → join room
+          if (targetRoom) {
+            try {
+              await socket.join(targetRoom);
+              socket.data.roomId = targetRoom;
 
-            // ✅ CHANGED: emit room_joined ONLY if changed
-            if (socket.data._lastRoomJoined !== targetRoom) {
-              socket.emit('room_joined', { roomId: targetRoom });
-              socket.data._lastRoomJoined = targetRoom;
+              // ✅ CHANGED: emit room_joined ONLY if changed
+              if (socket.data._lastRoomJoined !== targetRoom) {
+                socket.emit('room_joined', { roomId: targetRoom });
+                socket.data._lastRoomJoined = targetRoom;
+              }
+
+              const list = await buildDeviceListForRoom(targetRoom);
+              const safeList = Array.isArray(list) ? list : [];
+
+              // ✅ CHANGED: emit device_list ONLY if changed
+              const sig = JSON.stringify(safeList.map(d => [d?.xrId || '', d?.deviceName || '']));
+              if (sig !== socket.data._lastDeviceListSig) {
+                socket.emit('device_list', safeList);
+                socket.data._lastDeviceListSig = sig;
+              }
+
+              dlog('[COCKPIT][REQ_LIST] joined + sent list', { socketId: socket.id, targetRoom });
+              return;
+            } catch (e) {
+              dwarn('[COCKPIT][REQ_LIST] join failed', { err: e?.message || e, targetRoom });
+            }
+          }
+
+          // ✅ CASE 2: target online but NOT paired → show single device
+          if (primaryFinal) {
+            socket.data.roomId = null;
+
+            // ✅ CHANGED: DO NOT spam room_joined(null) every poll (this was causing flicker)
+            if (socket.data._lastRoomJoined !== null) {
+              socket.emit('room_joined', { roomId: null, reason: 'target_not_paired_yet' });
+              socket.data._lastRoomJoined = null;
             }
 
-            const list = await buildDeviceListForRoom(targetRoom);
-            const safeList = Array.isArray(list) ? list : [];
+            try {
+              const b = batteryByDevice?.get(target) || {};
+              const t = telemetryByDevice?.get(target) || null;
 
-            // ✅ CHANGED: emit device_list ONLY if changed
-            const sig = JSON.stringify(safeList.map(d => [d?.xrId || '', d?.deviceName || '']));
-            if (sig !== socket.data._lastDeviceListSig) {
-              socket.emit('device_list', safeList);
-              socket.data._lastDeviceListSig = sig;
+              const one = [{
+                xrId: target,
+                deviceName: primaryFinal.data?.deviceName || 'Unknown',
+                battery: (typeof b.pct === 'number') ? b.pct : null,
+                charging: !!b.charging,
+                batteryTs: b.ts || null,
+                ...(t ? { telemetry: t } : {}),
+              }];
+
+              // ✅ CHANGED: emit device_list ONLY if changed
+              const sig = JSON.stringify(one.map(d => [d?.xrId || '', d?.deviceName || '']));
+              if (sig !== socket.data._lastDeviceListSig) {
+                socket.emit('device_list', one);
+                socket.data._lastDeviceListSig = sig;
+              }
+
+              dlog('[COCKPIT][REQ_LIST] target online but not paired → sent self-only device_list', {
+                socketId: socket.id, target
+              });
+            } catch (e) {
+              const emptySig = '[]';
+              if (emptySig !== socket.data._lastDeviceListSig) {
+                socket.emit('device_list', []);
+                socket.data._lastDeviceListSig = emptySig;
+              }
+              dwarn('[COCKPIT][REQ_LIST] self-only list failed', { err: e?.message || e });
             }
-
-            dlog('[COCKPIT][REQ_LIST] joined + sent list', { socketId: socket.id, targetRoom });
             return;
-          } catch (e) {
-            dwarn('[COCKPIT][REQ_LIST] join failed', { err: e?.message || e, targetRoom });
           }
         }
 
-        // ✅ CASE 2: target online but NOT paired → show single device
-        if (primaryFinal) {
-          socket.data.roomId = null;
-
-          // ✅ CHANGED: DO NOT spam room_joined(null) every poll (this was causing flicker)
-          if (socket.data._lastRoomJoined !== null) {
-            socket.emit('room_joined', { roomId: null, reason: 'target_not_paired_yet' });
-            socket.data._lastRoomJoined = null;
-          }
-
-          try {
-            const b = batteryByDevice?.get(target) || {};
-            const t = telemetryByDevice?.get(target) || null;
-
-            const one = [{
-              xrId: target,
-              deviceName: primaryFinal.data?.deviceName || 'Unknown',
-              battery: (typeof b.pct === 'number') ? b.pct : null,
-              charging: !!b.charging,
-              batteryTs: b.ts || null,
-              ...(t ? { telemetry: t } : {}),
-            }];
-
-            // ✅ CHANGED: emit device_list ONLY if changed
-            const sig = JSON.stringify(one.map(d => [d?.xrId || '', d?.deviceName || '']));
-            if (sig !== socket.data._lastDeviceListSig) {
-              socket.emit('device_list', one);
-              socket.data._lastDeviceListSig = sig;
-            }
-
-            dlog('[COCKPIT][REQ_LIST] target online but not paired → sent self-only device_list', {
-              socketId: socket.id, target
-            });
-          } catch (e) {
-            const emptySig = '[]';
-            if (emptySig !== socket.data._lastDeviceListSig) {
-              socket.emit('device_list', []);
-              socket.data._lastDeviceListSig = emptySig;
-            }
-            dwarn('[COCKPIT][REQ_LIST] self-only list failed', { err: e?.message || e });
-          }
-          return;
+        // ✅ CASE 3: target offline → empty list
+        // ✅ CHANGED: DO NOT spam room_joined(null) every poll
+        if (socket.data._lastRoomJoined !== null) {
+          socket.emit('room_joined', { roomId: null, reason: 'primary_not_online_yet' });
+          socket.data._lastRoomJoined = null;
         }
+
+        // ✅ CHANGED: emit empty device_list only if changed
+        const emptySig = '[]';
+        if (emptySig !== socket.data._lastDeviceListSig) {
+          socket.emit('device_list', []);
+          socket.data._lastDeviceListSig = emptySig;
+        }
+
+        dlog('[COCKPIT][REQ_LIST] target offline; sent empty list', { socketId: socket.id, target });
+        return;
       }
 
-      // ✅ CASE 3: target offline → empty list
-      // ✅ CHANGED: DO NOT spam room_joined(null) every poll
-      if (socket.data._lastRoomJoined !== null) {
-        socket.emit('room_joined', { roomId: null, reason: 'primary_not_online_yet' });
-        socket.data._lastRoomJoined = null;
-      }
-
-      // ✅ CHANGED: emit empty device_list only if changed
-      const emptySig = '[]';
-      if (emptySig !== socket.data._lastDeviceListSig) {
-        socket.emit('device_list', []);
-        socket.data._lastDeviceListSig = emptySig;
-      }
-
-      dlog('[COCKPIT][REQ_LIST] target offline; sent empty list', { socketId: socket.id, target });
-      return;
-    }
-
-    // ✅ If paired → ONLY devices in this room
-    if (roomId) {
-      const list = await buildDeviceListForRoom(roomId);
-      const safeList = Array.isArray(list) ? list : [];
-
-      const sig = JSON.stringify(safeList.map(d => [d?.xrId || '', d?.deviceName || '']));
-      if (sig !== socket.data._lastDeviceListSig) {
-        socket.emit('device_list', safeList);
-        socket.data._lastDeviceListSig = sig;
-      }
-      return;
-    }
-
-    // ✅ Pair-aware fallback
-    const xrIdTmp = normXr(socket.data?.xrId);
-    const partnerTmp = xrIdTmp ? (pairedWith?.get?.(xrIdTmp) || null) : null;
-
-    if (!roomId && xrIdTmp && partnerTmp) {
-      const derivedRoom = getRoomIdForPair(xrIdTmp, partnerTmp);
-      try {
-        const list = await buildDeviceListForRoom(derivedRoom);
+      // ✅ If paired → ONLY devices in this room
+      if (roomId) {
+        const list = await buildDeviceListForRoom(roomId);
         const safeList = Array.isArray(list) ? list : [];
 
         const sig = JSON.stringify(safeList.map(d => [d?.xrId || '', d?.deviceName || '']));
@@ -5090,56 +5253,74 @@ socket.on('request_device_list', async () => {
           socket.emit('device_list', safeList);
           socket.data._lastDeviceListSig = sig;
         }
-      } catch (e) {
+        return;
+      }
+
+      // ✅ Pair-aware fallback
+      const xrIdTmp = normXr(socket.data?.xrId);
+      const partnerTmp = xrIdTmp ? (pairedWith?.get?.(xrIdTmp) || null) : null;
+
+      if (!roomId && xrIdTmp && partnerTmp) {
+        const derivedRoom = getRoomIdForPair(xrIdTmp, partnerTmp);
+        try {
+          const list = await buildDeviceListForRoom(derivedRoom);
+          const safeList = Array.isArray(list) ? list : [];
+
+          const sig = JSON.stringify(safeList.map(d => [d?.xrId || '', d?.deviceName || '']));
+          if (sig !== socket.data._lastDeviceListSig) {
+            socket.emit('device_list', safeList);
+            socket.data._lastDeviceListSig = sig;
+          }
+        } catch (e) {
+          const emptySig = '[]';
+          if (emptySig !== socket.data._lastDeviceListSig) {
+            socket.emit('device_list', []);
+            socket.data._lastDeviceListSig = emptySig;
+          }
+        }
+        return;
+      }
+
+      // ✅ NOT paired yet → show only self device
+      const xrId = normXr(socket.data?.xrId);
+      if (!xrId) {
         const emptySig = '[]';
         if (emptySig !== socket.data._lastDeviceListSig) {
           socket.emit('device_list', []);
           socket.data._lastDeviceListSig = emptySig;
         }
+        return;
       }
-      return;
-    }
 
-    // ✅ NOT paired yet → show only self device
-    const xrId = normXr(socket.data?.xrId);
-    if (!xrId) {
-      const emptySig = '[]';
-      if (emptySig !== socket.data._lastDeviceListSig) {
-        socket.emit('device_list', []);
-        socket.data._lastDeviceListSig = emptySig;
+      const b = batteryByDevice?.get(xrId) || {};
+      const t = telemetryByDevice?.get(xrId) || null;
+
+      const one = [{
+        xrId,
+        deviceName: socket.data?.deviceName || 'Unknown',
+        battery: (typeof b.pct === 'number') ? b.pct : null,
+        charging: !!b.charging,
+        batteryTs: b.ts || null,
+        ...(t ? { telemetry: t } : {}),
+      }];
+
+      const sig = JSON.stringify(one.map(d => [d?.xrId || '', d?.deviceName || '']));
+      if (sig !== socket.data._lastDeviceListSig) {
+        socket.emit('device_list', one);
+        socket.data._lastDeviceListSig = sig;
       }
-      return;
+
+    } catch (e) {
+      dwarn('[request_device_list] failed:', e.message);
+      try {
+        const emptySig = '[]';
+        if (socket.data?._lastDeviceListSig !== emptySig) {
+          socket.emit('device_list', []);
+          socket.data._lastDeviceListSig = emptySig;
+        }
+      } catch { }
     }
-
-    const b = batteryByDevice?.get(xrId) || {};
-    const t = telemetryByDevice?.get(xrId) || null;
-
-    const one = [{
-      xrId,
-      deviceName: socket.data?.deviceName || 'Unknown',
-      battery: (typeof b.pct === 'number') ? b.pct : null,
-      charging: !!b.charging,
-      batteryTs: b.ts || null,
-      ...(t ? { telemetry: t } : {}),
-    }];
-
-    const sig = JSON.stringify(one.map(d => [d?.xrId || '', d?.deviceName || '']));
-    if (sig !== socket.data._lastDeviceListSig) {
-      socket.emit('device_list', one);
-      socket.data._lastDeviceListSig = sig;
-    }
-
-  } catch (e) {
-    dwarn('[request_device_list] failed:', e.message);
-    try {
-      const emptySig = '[]';
-      if (socket.data?._lastDeviceListSig !== emptySig) {
-        socket.emit('device_list', []);
-        socket.data._lastDeviceListSig = emptySig;
-      }
-    } catch { }
-  }
-});
+  });
 
   // -------- pair_with --------
   // Option B: DB-driven auto pairing is enabled.
@@ -5593,7 +5774,7 @@ socket.on('request_device_list', async () => {
 
 
 
-//------------changes made regarding dashabord ***----------------------------------------------------------------
+  //------------changes made regarding dashabord ***----------------------------------------------------------------
   socket.on('webrtc_quality', (q) => {
     dlog('[QUALITY] recv', q);
     try {
@@ -5701,7 +5882,7 @@ socket.on('request_device_list', async () => {
 
 
 
-//------------changes made regarding dashabord ***----------------------------------------------------------------
+  //------------changes made regarding dashabord ***----------------------------------------------------------------
   socket.on('disconnect', async (reason) => {
     if (socket.data?.clientType === 'cockpit' || socket.data?.clientType === 'dashboard') return;
     dlog('❎ [EVENT] disconnect', {

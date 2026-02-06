@@ -199,6 +199,29 @@ button { transition: background-color 0.3s; font-weight: 500; }
 .scribe-btn-ghost{ background:#374151 }
 .scribe-btn-ghost:hover{ background:#4b5563 }
 
+/* =========================
+   Add To EHR button states
+   ========================= */
+
+/* Enabled state */
+#_scribe_add_ehr{
+  background: #2563eb; /* blue */
+}
+#_scribe_add_ehr:hover{
+  background: #1d4ed8;
+}
+
+/* Disabled state – ONLY when class OR disabled attribute is present */
+#_scribe_add_ehr.scribe-add-ehr-disabled,
+#_scribe_add_ehr:disabled{
+  background:#7f1d1d !important;
+  color:#fff !important;
+  opacity:0.95 !important;
+  cursor:not-allowed !important;
+  pointer-events:none !important;
+}
+
+
 /* Responsive footer buttons */
 @media (max-width: 520px){
   .scribe-soap-actions{ flex-wrap: wrap; }
@@ -208,19 +231,6 @@ button { transition: background-color 0.3s; font-weight: 500; }
 
 /* Add EHR disabled style (kept) */
 .scribe-add-ehr-disabled{ background:#7f1d1d; color:#fff; opacity:0.95; cursor:not-allowed }
-#_scribe_add_ehr.scribe-btn,
-#_scribe_add_ehr.scribe-btn:disabled,
-.scribe-btn.scribe-add-ehr-disabled,
-.scribe-btn:disabled {
-  background: #7f1d1d !important;
-  color: #fff !important;
-  opacity: 0.95 !important;
-  cursor: not-allowed !important;
-  pointer-events: none;
-}
-#_scribe_add_ehr.scribe-btn:hover,
-.scribe-btn:disabled:hover { background: #7f1d1d !important; }
-
 /* =========================
    RESIZABLE PANEL LAYOUT
    ========================= */
