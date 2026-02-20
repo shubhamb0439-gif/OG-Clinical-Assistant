@@ -17,6 +17,10 @@
     btnSave: document.getElementById('_scribe_save'),
     btnAddEhr: document.getElementById('_scribe_add_ehr'),
 
+    // AI Diagnosis pane (RIGHT-BOTTOM or embedded)
+    aiPane: document.getElementById('aiPane'),
+    aiDiagnosisBody: document.getElementById('aiDiagnosisBody'),
+
     // EHR sidebar
     ehrButton: document.getElementById('ehrButton'),
     ehrSidebar: document.getElementById('ehrSidebar'),
@@ -47,14 +51,13 @@
   // =====================================================================================
   //  CONSTANTS + RUNTIME STATE
   // =====================================================================================
-  const CONST = {
+  const CONFIG = {
     PLACEHOLDER_ID: 'scribe-transcript-placeholder',
     MAX_TRANSCRIPT_LINES: 300,
 
     // endpoints
     LOCAL_DEFAULT: 'http://localhost:8080',
-    PROD_DEFAULT:
-      'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net',
+    PROD_DEFAULT: 'https://xr-messaging-geexbheshbghhab7.centralindia-01.azurewebsites.net',
 
     // timers
     DEVICE_LIST_POLL_MS: 1500,
@@ -69,6 +72,12 @@
     // EHR
     EHR_STORAGE_KEY: 'ehr_state_v1',
     SUMMARY_NOTE_ID: 'summary',
+
+    // Templates
+    SOAP_NOTE_TEMPLATE_ID: '20',
+
+    // AI Diagnosis
+    AI_DIAGNOSIS_ENDPOINT: '/ehr/ai/diagnosis',
   };
 
   const state = {
@@ -80,28 +89,35 @@
     SERVER_URL: null,
     socket: null,
 
-    // transcript (incremental merge)
+    // transcript incremental state
     transcriptState: { byKey: {} },
 
-    // current transcript selection
+    // active transcript
     currentActiveItemId: null,
 
-    // soap
+    // soap note
     latestSoapNote: {},
     soapGenerating: false,
     soapNoteTimer: null,
     soapNoteStartTime: null,
 
-    // FIFO queue to bind soap_note_console -> transcript item
+    // Summary timer (NEW)
+    summaryGenerating: false,
+    summaryTimer: null,
+    summaryStartTime: null,
+    summaryRefreshDebounce: null,
+
+
+    // FIFO queue: soap_note_console -> transcript item
     pendingSoapItemQueue: [],
 
-    // edits badge
+    // total edits badge
     totalEditsBadgeEl: null,
 
-    // per textarea incremental diff state
+    // per-textarea diff state
     editStateMap: new WeakMap(),
 
-    // Add-to-EHR in-flight guard
+    // add-to-EHR guard
     addEhrInFlight: false,
 
     // device list throttling
@@ -111,7 +127,7 @@
     pendingEmptyDeviceListTimer: null,
     lastRenderedDeviceKey: '',
 
-    // medication
+    // medication availability
     medAvailability: new Map(),
     medicationValidationPending: false,
     medicationDebounceTimer: null,
@@ -120,16 +136,29 @@
     currentPatient: null,
     currentNotes: [],
     noteCache: new Map(),
+    me: null, // cached /api/platform/me
+    summaryCacheByMrn: new Map(), // mrn -> { text, template_title, fetchedAt, raw }
+    patientCacheByMrn: new Map(), // mrn -> { patientId, patient }
+
+    // AI diagnosis state
+    aiDiagnosisInFlight: false,
+    aiDiagnosisInFlightFor: null,
+    aiDiagnosisLastError: null,
+    aiDiagnosisTimer: null,
+    aiDiagnosisStartTime: null,
+
+    // Template selection requirement
+    templateSelected: false,
+    templateSelectionModal: null,
+
+    // Summary cache invalidation on note edits
+    noteTouchedAtByMrn: new Map(),
+    lastNoteTouchedAt: 0,
   };
 
-  // =====================================================================================
-  //  STORAGE KEYS (Room-scoped + legacy fallback)
-  // =====================================================================================
-  function roomLS(base) {
-    const r = state.currentRoom || '__noroom__';
-    return `scribe:${r}:${base}`;
-  }
-
+  // =============================================================================
+  //  STORAGE KEYS (room-scoped + legacy fallback)
+  // =============================================================================
   const LEGACY_KEYS = {
     HISTORY: 'scribe.history',
     LATEST_SOAP: 'scribe.latestSoap',
@@ -137,25 +166,27 @@
     MED_AVAIL: 'scribe.medAvailability',
   };
 
+  function roomLS(base) {
+    const r = state.currentRoom || '__noroom__';
+    return `scribe:${r}:${base}`;
+  }
+
   const LS_KEYS = {
     HISTORY: () => (state.currentRoom ? roomLS('history') : LEGACY_KEYS.HISTORY),
-    LATEST_SOAP: () =>
-      state.currentRoom ? roomLS('latestSoap') : LEGACY_KEYS.LATEST_SOAP,
-    ACTIVE_ITEM_ID: () =>
-      state.currentRoom ? roomLS('activeItem') : LEGACY_KEYS.ACTIVE_ITEM_ID,
-    MED_AVAIL: () =>
-      state.currentRoom ? roomLS('medAvailability') : LEGACY_KEYS.MED_AVAIL,
+    LATEST_SOAP: () => (state.currentRoom ? roomLS('latestSoap') : LEGACY_KEYS.LATEST_SOAP),
+    ACTIVE_ITEM_ID: () => (state.currentRoom ? roomLS('activeItem') : LEGACY_KEYS.ACTIVE_ITEM_ID),
+    MED_AVAIL: () => (state.currentRoom ? roomLS('medAvailability') : LEGACY_KEYS.MED_AVAIL),
   };
 
-  // =====================================================================================
-  //  GENERAL HELPERS
-  // =====================================================================================
+  // =============================================================================
+  //  UTILS
+  // =============================================================================
   function uid() {
     return Math.random().toString(36).slice(2) + Date.now().toString(36);
   }
 
   function escapeHtml(str) {
-    return String(str || '')
+    return String(str ?? '')
       .replaceAll('&', '&amp;')
       .replaceAll('<', '&lt;')
       .replaceAll('>', '&gt;')
@@ -163,31 +194,56 @@
       .replaceAll("'", '&#039;');
   }
 
-  function lsSafeParse(key, fallback) {
+  function safeJsonParse(raw, fallback) {
     try {
-      const raw = localStorage.getItem(key);
       return raw ? JSON.parse(raw) : fallback;
     } catch {
       return fallback;
     }
   }
 
-  function apiGetJson(url) {
-    return fetch(url).then(async (res) => {
-      if (!res.ok) throw new Error(`Request failed (${res.status})`);
-      return res.json();
-    });
+  function lsSafeParse(key, fallback) {
+    try {
+      return safeJsonParse(localStorage.getItem(key), fallback);
+    } catch {
+      return fallback;
+    }
   }
 
-  // =====================================================================================
-  //  SERVER URL SELECTION
-  // =====================================================================================
+  function clampNumber(n, fallback = 0) {
+    const v = Number(n);
+    return Number.isFinite(v) && v >= 0 ? v : fallback;
+  }
+
+  function normalizeTextBlock(v) {
+    return String(v ?? '').replace(/\r\n/g, '\n').trim();
+  }
+
+  function normalizeTemplateId(v) {
+    const s = String(v ?? '').trim();
+    return s ? s : CONFIG.SOAP_NOTE_TEMPLATE_ID;
+  }
+
+  function templateIdToApiValue(v) {
+    const n = Number(normalizeTemplateId(v));
+    return Number.isFinite(n) && n > 0 ? n : Number(CONFIG.SOAP_NOTE_TEMPLATE_ID);
+  }
+
+  async function apiGetJson(url) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Request failed (${res.status})`);
+    return res.json();
+  }
+
+  // =============================================================================
+  //  ENDPOINT SELECTION
+  // =============================================================================
   const OVERRIDES = Array.isArray(window.SCRIBE_PUBLIC_ENDPOINTS)
     ? window.SCRIBE_PUBLIC_ENDPOINTS
     : null;
 
-  const LOCAL = (OVERRIDES?.[0] || CONST.LOCAL_DEFAULT).replace(/\/$/, '');
-  const PRODUCTION = (OVERRIDES?.[1] || CONST.PROD_DEFAULT).replace(/\/$/, '');
+  const LOCAL = (OVERRIDES?.[0] || CONFIG.LOCAL_DEFAULT).replace(/\/$/, '');
+  const PRODUCTION = (OVERRIDES?.[1] || CONFIG.PROD_DEFAULT).replace(/\/$/, '');
 
   const host = location.hostname;
   const isLocal =
@@ -202,9 +258,158 @@
   const preferredEndpoint = isLocal ? LOCAL : PRODUCTION;
   const fallbackEndpoint = isLocal ? PRODUCTION : LOCAL;
 
-  // =====================================================================================
-  //  UI STYLES
-  // =====================================================================================
+  // =============================================================================
+  //  STYLES
+  // =============================================================================
+  function createTemplateSelectionModal() {
+    const modal = document.createElement('div');
+    modal.id = 'templateSelectionModal';
+    modal.style.cssText = `
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.85);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      backdrop-filter: blur(4px);
+    `;
+
+    const content = document.createElement('div');
+    content.style.cssText = `
+      background: #1f2937;
+      padding: 32px;
+      border-radius: 12px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+      max-width: 500px;
+      width: 90%;
+      text-align: center;
+    `;
+
+    const title = document.createElement('h2');
+    title.textContent = 'Select Note Template';
+    title.style.cssText = `
+      font-size: 24px;
+      font-weight: bold;
+      margin-bottom: 12px;
+      color: #fff;
+    `;
+
+    const desc = document.createElement('p');
+    desc.textContent = 'Please select a template before starting transcription';
+    desc.style.cssText = `
+      font-size: 14px;
+      color: #9ca3af;
+      margin-bottom: 24px;
+    `;
+
+    const select = document.createElement('select');
+    select.id = 'modalTemplateSelect';
+    select.style.cssText = `
+      width: 100%;
+      padding: 12px 16px;
+      font-size: 16px;
+      border: 2px solid #374151;
+      border-radius: 10px;
+      background: #111827;
+      color: #fff;
+      margin-bottom: 24px;
+      cursor: pointer;
+    `;
+
+    const buttonContainer = document.createElement('div');
+    buttonContainer.style.cssText = `
+      display: flex;
+      gap: 12px;
+      width: 100%;
+    `;
+
+    const confirmBtn = document.createElement('button');
+    confirmBtn.textContent = 'Confirm Selection';
+    confirmBtn.style.cssText = `
+      flex: 1;
+      padding: 12px 24px;
+      font-size: 16px;
+      font-weight: 700;
+      background: #6366f1;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.2s;
+    `;
+    confirmBtn.onmouseover = () => confirmBtn.style.background = '#4f46e5';
+    confirmBtn.onmouseout = () => confirmBtn.style.background = '#6366f1';
+
+    confirmBtn.onclick = () => {
+      const selectedValue = select.value;
+      if (selectedValue) {
+        state.templateSelected = true;
+        if (dom.templateSelect) {
+          dom.templateSelect.value = selectedValue;
+        }
+        modal.remove();
+        state.templateSelectionModal = null;
+      }
+    };
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.style.cssText = `
+      flex: 1;
+      padding: 12px 24px;
+      font-size: 16px;
+      font-weight: 700;
+      background: #374151;
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: background 0.2s;
+    `;
+    cancelBtn.onmouseover = () => cancelBtn.style.background = '#4b5563';
+    cancelBtn.onmouseout = () => cancelBtn.style.background = '#374151';
+
+    cancelBtn.onclick = () => {
+      modal.remove();
+      state.templateSelectionModal = null;
+    };
+
+    buttonContainer.appendChild(confirmBtn);
+    buttonContainer.appendChild(cancelBtn);
+
+    content.appendChild(title);
+    content.appendChild(desc);
+    content.appendChild(select);
+    content.appendChild(buttonContainer);
+    modal.appendChild(content);
+
+    document.body.appendChild(modal);
+    state.templateSelectionModal = modal;
+
+    return { modal, select };
+  }
+
+  function showTemplateSelectionModal() {
+    if (state.templateSelectionModal) return;
+    if (state.templateSelected) return;
+
+    const { modal, select } = createTemplateSelectionModal();
+
+    if (dom.templateSelect) {
+      Array.from(dom.templateSelect.options).forEach(opt => {
+        const option = document.createElement('option');
+        option.value = opt.value;
+        option.textContent = opt.textContent;
+        select.appendChild(option);
+      });
+      select.value = dom.templateSelect.value;
+    }
+  }
+
   function ensureUiStyles() {
     if (document.getElementById('scribe-ui-css')) return;
 
@@ -277,6 +482,10 @@
         min-height: 80px;
       }
 
+      /* Clamp textarea height to enable inner scroll (stable layout) */
+      .scribe-textarea { max-height: 220px; overflow-y: auto; }
+
+
       ._scribe_total_edits {
         display:inline-flex;
         align-items:center;
@@ -289,20 +498,210 @@
         font-size: 12px;
         white-space: nowrap;
       }
+
+      /* Auto-save only */
+      #_scribe_save { display:none !important; }
+
+      /* AI Diagnosis button states */
+      .scribe-ai-btn{
+        border: 0;
+        border-radius: 10px;
+        padding: 0 16px;
+        height: 36px;
+        min-width: 132px;
+        font-size: 13px;
+        font-weight: 700;
+        cursor: pointer;
+        color: #ffffff;
+        transition: background .15s ease, border-color .15s ease, opacity .15s ease;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .scribe-ai-btn.scribe-ai-btn--generate{
+       background: #0F4D0F !important;
+       border: 1px solid rgba(15, 77, 15, 0.85) !important;
+       color: #ffffff !important;
+      }
+       .scribe-ai-btn.scribe-ai-btn--generate:hover{
+       background: #0c3f0c !important;
+       border-color: rgba(15, 77, 15, 1) !important;
+      }
+
+      .scribe-ai-btn.scribe-ai-btn--generating{
+        background: rgba(245,158,11,0.18);
+        border: 1px solid rgba(245,158,11,0.55);
+        cursor: not-allowed;
+      }
+      .scribe-ai-btn.scribe-ai-btn--generated{
+        background: rgba(148,163,184,0.12);
+        border: 1px solid rgba(148,163,184,0.35);
+        color: rgba(255,255,255,0.75);
+        cursor: not-allowed;
+      }
+      .scribe-ai-btn:disabled{ opacity: 1; }
+
+      /* AI Diagnosis button in section head: ensure it stays on same line */
+      .scribe-section-head .scribe-ai-btn {
+        flex-shrink: 0;
+        margin-left: auto;
+      }
+
+      /* AI Diagnosis header: title left, button right aligned on same line */
+      .scribe-ai-pane-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 12px;
+        gap: 12px;
+        border-bottom: 1px solid rgba(255,255,255,0.06);
+      }
+      .scribe-ai-pane-title {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 700;
+        color: #ffffff;
+        flex: 0 0 auto;
+      }
+
+      .scribe-ai-body { padding: 12px 14px; color: #ffffff; height: 100%; box-sizing: border-box; }
+      .scribe-ai-body-inner {
+        max-width: 900px;
+        margin: 0 auto;
+        font-size: 14px;
+        line-height: 1.8;
+        word-break: break-word;
+        text-align: justify;
+        text-justify: inter-word;
+      }
+
+      .scribe-ai-center {
+        min-height: 160px;
+        height: 100%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+      }
+      .scribe-ai-empty { color: rgba(255,255,255,0.65); font-weight: 700; }
+      .scribe-ai-loading { color:#ffffff; font-weight: 800; }
+      .scribe-ai-error { color:#f87171; font-weight: 800; }
+
+.scribe-ai-comp { margin: 12px 0 18px 0; }
+.scribe-ai-comp-box {
+  border: 1px solid rgba(148,163,184,0.25);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #111827 !important;
+}
+.scribe-ai-comp-box-head {
+  display:flex; align-items:center; justify-content:space-between;
+  padding: 10px 12px;
+  background: #0b1220 !important;
+  border-bottom: 1px solid rgba(148,163,184,0.25);
+  font-weight: 900;
+}
+.scribe-ai-comp-box-body {
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow: auto;
+  color: rgba(255,255,255,0.92);
+  line-height: 1.7;
+  word-break: break-word;
+  text-align: justify;
+  text-justify: inter-word;
+}
+
+      .scribe-ai-comp-title { font-weight: 900; color: #ffffff; margin: 0 0 8px 0; }
+      .scribe-ai-comp-text {
+        text-align: justify;
+        text-justify: inter-word;
+      }
+      .scribe-ai-comp-text p {
+        margin: 0 0 12px 0;
+        color: rgba(255,255,255,0.92);
+        text-align: justify;
+        text-justify: inter-word;
+        hyphens: auto;
+      }
+    
+/* === AI Diagnosis: match SOAP note section look + scrolling === */
+.scribe-ai-pane-scroll{
+  height: 100%;
+  overflow: auto;
+  padding-right: 6px;
+}
+.scribe-ai-sections{
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin: 12px 0 18px 0;
+}
+.scribe-ai-section .scribe-section-head{
+  background: #0b1220 !important;
+}
+.scribe-ai-comp-scroll{
+  padding: 10px 12px;
+  max-height: 240px;
+  overflow: auto;
+  color: rgba(255,255,255,0.92);
+  line-height: 1.7;
+  word-break: break-word;
+}
+.scribe-ai-comp-scroll::-webkit-scrollbar{
+  width: 8px;
+}
+.scribe-ai-comp-scroll::-webkit-scrollbar-thumb{
+  background: rgba(148,163,184,0.35);
+  border-radius: 10px;
+}
+.scribe-ai-pane-scroll::-webkit-scrollbar{
+  width: 10px;
+}
+.scribe-ai-pane-scroll::-webkit-scrollbar-thumb{
+  background: rgba(148,163,184,0.35);
+  border-radius: 10px;
+}
+
+`;
+    document.head.appendChild(s);
+  }
+
+  function ensureMedStyles() {
+    if (document.getElementById('med-inline-css')) return;
+    const s = document.createElement('style');
+    s.id = 'med-inline-css';
+    s.textContent = `
+      .med-line { display:flex; align-items:center; gap:8px; }
+      .med-emoji { font-weight: 800; display:inline-block; transform-origin:center; }
+      .med-wrap { position: relative; }
+      .med-overlay {
+        position:absolute;
+        inset:0;
+        pointer-events:none;
+        white-space: pre-wrap;
+        overflow:hidden;
+        font: inherit;
+        line-height: inherit;
+        color: inherit;
+        z-index:2;
+      }
+      @keyframes pulse { 0%,100% { transform:scale(1); opacity:1; } 50% { transform:scale(.9); opacity:.7; } }
+      .med-pending { animation: pulse 1.2s ease-in-out infinite; }
     `;
     document.head.appendChild(s);
   }
 
-  // =====================================================================================
+  // =============================================================================
   //  STATUS PILL
-  // =====================================================================================
+  // =============================================================================
   function setStatus(text) {
     if (!dom.statusPill) return;
     dom.statusPill.textContent = text;
     dom.statusPill.setAttribute('aria-label', `Connection status: ${text}`);
 
     dom.statusPill.classList.remove('bg-yellow-500', 'bg-green-500', 'bg-red-600');
-    switch ((text || '').toLowerCase()) {
+    switch (String(text || '').toLowerCase()) {
       case 'connected':
         dom.statusPill.classList.add('bg-green-500');
         break;
@@ -315,7 +714,7 @@
     }
   }
 
-  function updateConnectionStatus(_src = '', devices = []) {
+  function updateConnectionStatus(_src, devices = []) {
     const connected = !!(state.socket && state.socket.connected);
     const count = Array.isArray(devices) ? devices.length : 0;
 
@@ -324,135 +723,9 @@
     setStatus(status);
   }
 
-  // =====================================================================================
-  //  DEVICE LIST (throttle + watchdog)
-  // =====================================================================================
-  function showNoDevices() {
-    if (!dom.deviceList) return;
-    dom.deviceList.innerHTML = '';
-    const li = document.createElement('li');
-    li.className = 'text-gray-400';
-    li.textContent = 'No devices online';
-    dom.deviceList.appendChild(li);
-  }
-
-  function requestDeviceListThrottled(_why) {
-    const now = Date.now();
-    const minGapMs = state.currentRoom
-      ? CONST.DEVICE_LIST_THROTTLE_ROOM_MS
-      : CONST.DEVICE_LIST_THROTTLE_NO_ROOM_MS;
-
-    if (now - state.lastReqListAt < minGapMs) return;
-    if (state.reqListTimer) return;
-
-    state.reqListTimer = setTimeout(() => {
-      state.reqListTimer = null;
-      state.lastReqListAt = Date.now();
-      if (!state.socket?.connected) return;
-      try {
-        state.socket.emit('request_device_list');
-      } catch {}
-    }, 50);
-  }
-
-  function stopDeviceListWatchdog() {
-    if (state.deviceListPollTimer) {
-      clearInterval(state.deviceListPollTimer);
-      state.deviceListPollTimer = null;
-    }
-  }
-
-  function startDeviceListWatchdog() {
-    stopDeviceListWatchdog();
-    state.deviceListPollTimer = setInterval(() => {
-      if (!state.socket?.connected) return;
-      if (document.visibilityState === 'hidden') return;
-      requestDeviceListThrottled('watchdog_poll');
-    }, CONST.DEVICE_LIST_POLL_MS);
-  }
-
-  document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') requestDeviceListThrottled('tab_visible');
-  });
-
-  function updateDeviceList(payload) {
-    let devices = Array.isArray(payload)
-      ? payload
-      : Array.isArray(payload?.devices)
-      ? payload.devices
-      : [];
-
-    // If the server includes room metadata on device entries, filter to the current room.
-    // This prevents showing devices from other rooms if the backend emits a broader list.
-    if (state.currentRoom && Array.isArray(devices) && devices.length) {
-      const cr = String(state.currentRoom).trim();
-      const filtered = devices.filter((d) => {
-        const r =
-          d?.roomId ??
-          d?.room ??
-          d?.pairId ??
-          d?.pair_id ??
-          d?.data?.roomId ??
-          d?.data?.room ??
-          d?.data?.pairId ??
-          null;
-        if (!r) return true; // if backend doesn't attach room on device, keep it
-        return String(r).trim() === cr;
-      });
-      devices = filtered;
-    }
-
-    if (!dom.deviceList) return;
-
-    if (state.pendingEmptyDeviceListTimer) {
-      clearTimeout(state.pendingEmptyDeviceListTimer);
-      state.pendingEmptyDeviceListTimer = null;
-    }
-
-    const ids = devices
-      .map((d) => String(d?.xrId || '').trim().toUpperCase())
-      .filter(Boolean)
-      .sort();
-    const nextKey = ids.join('|');
-
-    if (nextKey && nextKey === state.lastRenderedDeviceKey) {
-      updateConnectionStatus('device_list', devices);
-      return;
-    }
-
-    if (devices.length === 0) {
-      state.pendingEmptyDeviceListTimer = setTimeout(() => {
-        state.lastRenderedDeviceKey = '';
-        showNoDevices();
-        updateConnectionStatus('device_list', []);
-        state.pendingEmptyDeviceListTimer = null;
-      }, CONST.EMPTY_DEVICE_DELAY_MS);
-      return;
-    }
-
-    state.lastRenderedDeviceKey = nextKey;
-    dom.deviceList.innerHTML = '';
-
-    const sorted = devices.slice().sort((a, b) => {
-      const ax = String(a?.xrId || '').trim().toUpperCase();
-      const bx = String(b?.xrId || '').trim().toUpperCase();
-      return ax.localeCompare(bx);
-    });
-
-    sorted.forEach((d) => {
-      const name = d?.deviceName || d?.name || (d?.xrId ? `Device (${d.xrId})` : 'Unknown');
-      const li = document.createElement('li');
-      li.className = 'text-gray-300';
-      li.textContent = d?.xrId ? `${name} (${d.xrId})` : name;
-      dom.deviceList.appendChild(li);
-    });
-
-    updateConnectionStatus('device_list', devices);
-  }
-
-  // =====================================================================================
-  //  HISTORY STORAGE (UPDATED MODEL)
-  // =====================================================================================
+  // =============================================================================
+  //  HISTORY STORAGE
+  // =============================================================================
   function saveHistory(arr) {
     localStorage.setItem(LS_KEYS.HISTORY(), JSON.stringify(arr || []));
   }
@@ -472,14 +745,102 @@
     return localStorage.getItem(LS_KEYS.ACTIVE_ITEM_ID()) || '';
   }
 
-  // =====================================================================================
-  //  TRANSCRIPT UI HELPERS
-  // =====================================================================================
+  // =============================================================================
+  //  HISTORY NORMALIZATION (migration)
+  // =============================================================================
+  function normalizeHistoryItems(hist) {
+    let changed = false;
+
+    for (const item of hist) {
+      if (!item.note) {
+        if (item.notes?.default || item.soap) {
+          item.note = {
+            templateId: CONFIG.SOAP_NOTE_TEMPLATE_ID,
+            data: item.notes?.default || item.soap || {},
+          };
+          changed = true;
+        } else if (item.notes?.templates && Object.keys(item.notes.templates).length) {
+          const firstKey = Object.keys(item.notes.templates)[0];
+          item.note = { templateId: String(firstKey), data: item.notes.templates[firstKey] || {} };
+          changed = true;
+        } else {
+          item.note = { templateId: CONFIG.SOAP_NOTE_TEMPLATE_ID, data: {} };
+          changed = true;
+        }
+      }
+
+      if (item.note) {
+        const tid = String(item.note.templateId ?? '').trim();
+        if (!tid || tid === 'default') {
+          item.note.templateId = CONFIG.SOAP_NOTE_TEMPLATE_ID;
+          changed = true;
+        }
+      }
+
+      if (item.notes || item.soap || item.activeTemplateId) {
+        delete item.notes;
+        delete item.soap;
+        delete item.activeTemplateId;
+        changed = true;
+      }
+
+      if (item.aiDiagnosis && !item.aiDiagnosisByTemplate) {
+        item.aiDiagnosisByTemplate = item.aiDiagnosisByTemplate || {};
+        changed = true;
+      }
+    }
+
+    if (changed) saveHistory(hist);
+    return hist;
+  }
+
+  function getActiveHistoryContext() {
+    const hist = normalizeHistoryItems(loadHistory());
+    const activeId = loadActiveItemId();
+    const idx = activeId ? hist.findIndex((x) => x.id === activeId) : -1;
+    const i = idx !== -1 ? idx : hist.length ? hist.length - 1 : -1;
+    return { hist, index: i, item: i !== -1 ? hist[i] : null };
+  }
+
+  function getActiveNoteForItem(item) {
+    return item?.note?.data || {};
+  }
+
+  function getActiveTemplateIdForItem(item) {
+    return normalizeTemplateId(item?.note?.templateId);
+  }
+
+  function setActiveTemplateIdForItem(item, templateId) {
+    item.note = item.note || { templateId: CONFIG.SOAP_NOTE_TEMPLATE_ID, data: {} };
+    item.note.templateId = normalizeTemplateId(templateId);
+  }
+
+  function setActiveNoteDataForItem(item, noteObj) {
+    item.note = item.note || { templateId: CONFIG.SOAP_NOTE_TEMPLATE_ID, data: {} };
+    item.note.data = noteObj || {};
+  }
+
+  function setTemplateSelectValue(value) {
+    if (!dom.templateSelect) return;
+    const v = normalizeTemplateId(value);
+    const has = Array.from(dom.templateSelect.options || []).some((o) => o.value === v);
+    dom.templateSelect.value = has ? v : CONFIG.SOAP_NOTE_TEMPLATE_ID;
+  }
+
+  function syncDropdownToActiveTranscript() {
+    if (!dom.templateSelect) return;
+    const { item } = getActiveHistoryContext();
+    setTemplateSelectValue(getActiveTemplateIdForItem(item));
+  }
+
+  // =============================================================================
+  //  TRANSCRIPT UI
+  // =============================================================================
   function ensureTranscriptPlaceholder() {
     if (!dom.transcript) return;
-    if (!document.getElementById(CONST.PLACEHOLDER_ID)) {
+    if (!document.getElementById(CONFIG.PLACEHOLDER_ID)) {
       const ph = document.createElement('p');
-      ph.id = CONST.PLACEHOLDER_ID;
+      ph.id = CONFIG.PLACEHOLDER_ID;
       ph.className = 'text-gray-400 italic';
       ph.textContent = 'No transcript yet…';
       dom.transcript.appendChild(ph);
@@ -487,7 +848,7 @@
   }
 
   function removeTranscriptPlaceholder() {
-    const ph = document.getElementById(CONST.PLACEHOLDER_ID);
+    const ph = document.getElementById(CONFIG.PLACEHOLDER_ID);
     if (ph && ph.parentNode) ph.parentNode.removeChild(ph);
   }
 
@@ -510,110 +871,22 @@
 
   function highlightActiveCard() {
     if (!dom.transcript) return;
-    dom.transcript
-      .querySelectorAll('.scribe-card')
-      .forEach((c) => c.classList.remove('scribe-card-active'));
-    const active = dom.transcript.querySelector(
-      `.scribe-card[data-id="${CSS.escape(loadActiveItemId())}"]`
-    );
+    dom.transcript.querySelectorAll('.scribe-card').forEach((c) => c.classList.remove('scribe-card-active'));
+
+    const active = dom.transcript.querySelector(`.scribe-card[data-id="${CSS.escape(loadActiveItemId())}"]`);
     if (active) active.classList.add('scribe-card-active');
   }
 
   function trimTranscriptIfNeeded() {
     if (!dom.transcript) return;
     const cards = dom.transcript.querySelectorAll('.scribe-card');
-    if (cards.length <= CONST.MAX_TRANSCRIPT_LINES) return;
+    if (cards.length <= CONFIG.MAX_TRANSCRIPT_LINES) return;
 
-    const excess = cards.length - CONST.MAX_TRANSCRIPT_LINES;
+    const excess = cards.length - CONFIG.MAX_TRANSCRIPT_LINES;
     for (let i = 0; i < excess; i++) {
       const first = dom.transcript.querySelector('.scribe-card');
       if (first) dom.transcript.removeChild(first);
     }
-  }
-
-  // =====================================================================================
-  //  HISTORY NORMALIZATION (MIGRATION: old model -> new overwrite model)
-  // =====================================================================================
-  function normalizeHistoryItems(hist) {
-    let changed = false;
-
-    for (const item of hist) {
-      if (!item.note) {
-        if (item.notes?.default || item.soap) {
-          item.note = { templateId: 'default', data: item.notes?.default || item.soap || {} };
-          changed = true;
-        } else if (item.notes?.templates && Object.keys(item.notes.templates).length) {
-          const firstKey = Object.keys(item.notes.templates)[0];
-          item.note = { templateId: String(firstKey), data: item.notes.templates[firstKey] || {} };
-          changed = true;
-        } else {
-          item.note = { templateId: 'default', data: {} };
-          changed = true;
-        }
-      }
-
-      if (item.notes || item.soap || item.activeTemplateId) {
-        delete item.notes;
-        delete item.soap;
-        delete item.activeTemplateId;
-        changed = true;
-      }
-    }
-
-    if (changed) saveHistory(hist);
-    return hist;
-  }
-
-  function getActiveHistoryContext() {
-    const hist = normalizeHistoryItems(loadHistory());
-    const activeId = loadActiveItemId();
-    const idx = activeId ? hist.findIndex((x) => x.id === activeId) : -1;
-    const i = idx !== -1 ? idx : hist.length ? hist.length - 1 : -1;
-    return { hist, index: i, item: i !== -1 ? hist[i] : null };
-  }
-
-  function getActiveNoteForItem(item) {
-    return item?.note?.data || {};
-  }
-
-  function getActiveTemplateIdForItem(item) {
-    return String(item?.note?.templateId || 'default');
-  }
-
-  function setActiveTemplateIdForItem(item, templateId) {
-    item.note = item.note || { templateId: 'default', data: {} };
-    item.note.templateId = String(templateId || 'default');
-  }
-
-  function setActiveNoteDataForItem(item, noteObj) {
-    item.note = item.note || { templateId: 'default', data: {} };
-    item.note.data = noteObj || {};
-  }
-
-  function setTemplateSelectValue(value) {
-    if (!dom.templateSelect) return;
-    const v = String(value ?? 'default');
-    const has = Array.from(dom.templateSelect.options || []).some((o) => o.value === v);
-    dom.templateSelect.value = has ? v : 'default';
-  }
-
-  function syncDropdownToActiveTranscript() {
-    if (!dom.templateSelect) return;
-    const { item } = getActiveHistoryContext();
-    setTemplateSelectValue(getActiveTemplateIdForItem(item));
-  }
-
-  // =====================================================================================
-  //  TRANSCRIPT CARD + DELETE (used after EHR save too)
-  // =====================================================================================
-  function stopSoapGenerationTimer() {
-    try {
-      if (state.soapNoteTimer) {
-        clearInterval(state.soapNoteTimer);
-        state.soapNoteTimer = null;
-      }
-    } catch {}
-    state.soapNoteStartTime = null;
   }
 
   function deleteTranscriptItem(id) {
@@ -639,10 +912,8 @@
       state.soapGenerating = false;
       stopSoapGenerationTimer();
       renderSoapBlank();
-      if (dom.templateSelect) setTemplateSelectValue('default');
-      // NOTE: Do NOT clear device list here. Device connectivity is independent of transcript history.
-      // updateDeviceList([]);
-
+      if (dom.templateSelect) setTemplateSelectValue(CONFIG.SOAP_NOTE_TEMPLATE_ID);
+      clearAiDiagnosisPaneUi();
       return;
     }
 
@@ -652,6 +923,7 @@
       if (newActive) setActiveTranscriptId(newActive);
     } else {
       highlightActiveCard();
+      renderAiDiagnosisUi(null);
     }
   }
 
@@ -667,7 +939,7 @@
     const time = timestamp ? new Date(timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
     header.innerHTML = `🗣️ <span class="font-bold">${escapeHtml(from || 'Unknown')}</span>
       <span class="opacity-60">→ ${escapeHtml(to || 'Unknown')}</span>
-      <span class="opacity-60">(${time})</span>`;
+      <span class="opacity-60">(${escapeHtml(time)})</span>`;
     card.appendChild(header);
 
     const body = document.createElement('div');
@@ -704,11 +976,15 @@
     saveActiveItemId(id);
     highlightActiveCard();
 
+    // clear cross-item error so it doesn't block viewing cached results elsewhere
+    state.aiDiagnosisLastError = null;
+
     const ctx = getActiveHistoryContext();
     state.latestSoapNote = getActiveNoteForItem(ctx.item) || loadLatestSoap() || {};
     if (!state.soapGenerating) renderSoapNote(state.latestSoapNote);
 
     syncDropdownToActiveTranscript();
+    renderAiDiagnosisUi(null);
   }
 
   function appendTranscriptItem({ from, to, text, timestamp }) {
@@ -716,47 +992,35 @@
 
     removeTranscriptPlaceholder();
 
+    // Use the currently selected template ID from the dropdown
+    const selectedTemplateId = dom.templateSelect?.value || CONFIG.SOAP_NOTE_TEMPLATE_ID;
+
     const item = {
       id: uid(),
       from: from || 'Unknown',
       to: to || 'Unknown',
       text: String(text || '').trim(),
       timestamp: timestamp || Date.now(),
-      note: { templateId: 'default', data: {} }, // single overwrite slot
+      note: { templateId: selectedTemplateId, data: {} },
     };
 
     const hist = normalizeHistoryItems(loadHistory());
     hist.push(item);
     saveHistory(hist);
 
-    const card = createTranscriptCard(item);
-    dom.transcript.appendChild(card);
+    dom.transcript.appendChild(createTranscriptCard(item));
     trimTranscriptIfNeeded();
     dom.transcript.scrollTop = dom.transcript.scrollHeight;
 
-    state.pendingSoapItemQueue.push(item.id);
     setActiveTranscriptId(item.id);
 
-    if (!state.soapGenerating) startSoapGenerationTimer('default');
+    // Automatically generate note using the selected template
+    requestNoteGenerationForActiveTranscript(selectedTemplateId);
   }
 
-  // =====================================================================================
-  //  SOAP TIMER
-  // =====================================================================================
-  function startSoapGenerationTimer(_kind = 'default') {
-    stopSoapGenerationTimer();
-    state.soapGenerating = true;
-    state.soapNoteStartTime = Date.now();
-    renderSoapNoteGenerating(0);
-    state.soapNoteTimer = setInterval(() => {
-      const elapsedSec = Math.floor((Date.now() - state.soapNoteStartTime) / 1000);
-      renderSoapNoteGenerating(elapsedSec);
-    }, 1000);
-  }
-
-  // =====================================================================================
+  // =============================================================================
   //  SOAP SECTIONS ORDERING
-  // =====================================================================================
+  // =============================================================================
   function getSoapSections(soap) {
     const defaultSections = [
       'Chief Complaints',
@@ -787,9 +1051,9 @@
     return defaultSections;
   }
 
-  // =====================================================================================
-  //  SOAP RENDERING BASE
-  // =====================================================================================
+  // =============================================================================
+  //  SOAP CONTAINER + TIMER UI
+  // =============================================================================
   function soapContainerEnsure() {
     let scroller = document.getElementById('soapScroller');
     if (!scroller) {
@@ -803,11 +1067,6 @@
 
   function renderSoapBlank() {
     soapContainerEnsure().innerHTML = '';
-  }
-
-  function autoExpandTextarea(el) {
-    el.style.height = 'auto';
-    el.style.height = `${el.scrollHeight}px`;
   }
 
   function ensureTopHeadingBadge() {
@@ -824,14 +1083,23 @@
     return state.totalEditsBadgeEl;
   }
 
-  function renderSoapNoteGenerating(elapsed) {
+  function stopSoapGenerationTimer() {
+    if (state.soapNoteTimer) {
+      clearInterval(state.soapNoteTimer);
+      state.soapNoteTimer = null;
+    }
+    state.soapNoteStartTime = null;
+  }
+
+  function renderSoapNoteGenerating(elapsedSec) {
     const scroller = soapContainerEnsure();
     scroller.innerHTML = `
       <div class="scribe-section" style="text-align:center; color:#f59e0b; padding:16px;">
-        Please wait, AI is generating the note… ${elapsed}s
+        Please wait, AI is generating the note… ${elapsedSec}s
       </div>
     `;
     ensureTopHeadingBadge();
+    renderAiDiagnosisUi(null);
   }
 
   function renderSoapNoteError(msg) {
@@ -842,16 +1110,105 @@
       </div>
     `;
     ensureTopHeadingBadge();
+    renderAiDiagnosisUi(null);
   }
 
-  // =====================================================================================
-  //  INCREMENTAL EDIT TRACKING (unchanged)
-  // =====================================================================================
+  function startSoapGenerationTimer() {
+    stopSoapGenerationTimer();
+    state.soapGenerating = true;
+    state.soapNoteStartTime = Date.now();
+    renderSoapNoteGenerating(0);
+
+    state.soapNoteTimer = setInterval(() => {
+      const elapsedSec = Math.floor((Date.now() - state.soapNoteStartTime) / 1000);
+      renderSoapNoteGenerating(elapsedSec);
+    }, 1000);
+  }
+
+  // =============================================================================
+  // SUMMARY TIMER (simple, same pattern as SOAP)
+  // =============================================================================
+  function stopSummaryTimer() {
+    if (state.summaryTimer) {
+      clearInterval(state.summaryTimer);
+      state.summaryTimer = null;
+    }
+    state.summaryStartTime = null;
+    state.summaryGenerating = false;
+  }
+
+  function stopAiDiagnosisTimer() {
+    if (state.aiDiagnosisTimer) {
+      clearInterval(state.aiDiagnosisTimer);
+      state.aiDiagnosisTimer = null;
+    }
+    state.aiDiagnosisStartTime = null;
+  }
+
+  function startAiDiagnosisTimer() {
+    stopAiDiagnosisTimer();
+    state.aiDiagnosisStartTime = Date.now();
+
+    state.aiDiagnosisTimer = setInterval(() => {
+      const elapsedSec = Math.floor((Date.now() - state.aiDiagnosisStartTime) / 1000);
+      updateAiDiagnosisTimerDisplay(elapsedSec);
+    }, 1000);
+  }
+
+  function updateAiDiagnosisTimerDisplay(elapsedSec) {
+    let timerDisplay = null;
+
+    if (dom.aiDiagnosisBody) {
+      timerDisplay = dom.aiDiagnosisBody.querySelector('.scribe-ai-timer');
+    }
+
+    if (!timerDisplay) {
+      const fallbackBox = document.querySelector('[data-section="__ai_diagnosis__"] .scribe-ai-timer');
+      if (fallbackBox) timerDisplay = fallbackBox;
+    }
+
+    if (timerDisplay) {
+      timerDisplay.textContent = `${elapsedSec}s`;
+    }
+  }
+
+  function renderSummaryGenerating(elapsedSec) {
+    if (!dom.noteDetail) return;
+    dom.noteDetail.innerHTML = `<div class="text-gray-400 text-sm">Generating summary... ${elapsedSec}s</div>`;
+  }
+
+  function startSummaryTimer() {
+    stopSummaryTimer();
+    state.summaryGenerating = true;
+    state.summaryStartTime = Date.now();
+    renderSummaryGenerating(0);
+    state.summaryTimer = setInterval(() => {
+      const elapsedSec = Math.floor((Date.now() - state.summaryStartTime) / 1000);
+      renderSummaryGenerating(elapsedSec);
+    }, 1000);
+  }
+
+  function autoExpandTextarea(el) {
+    // Clamp height so each textarea has an internal scrollbar (stable UI)
+    try {
+      el.style.height = 'auto';
+      const maxH = Number(CONFIG.MAX_TEXTAREA_HEIGHT) || 220;
+      const next = Math.min(el.scrollHeight, maxH);
+      el.style.height = `${next}px`;
+      el.style.overflowY = el.scrollHeight > maxH ? 'auto' : 'hidden';
+    } catch {
+      // ignore
+    }
+  }
+
+  // =============================================================================
+  //  EDIT TRACKING (incremental diff, same algorithm)
+  // =============================================================================
   function rleEncodeTags(tags) {
     if (!tags || !tags.length) return [];
     const out = [];
-    let last = tags[0],
-      count = 1;
+    let last = tags[0];
+    let count = 1;
     for (let i = 1; i < tags.length; i++) {
       if (tags[i] === last) count++;
       else {
@@ -877,22 +1234,20 @@
   }
 
   function buildLcsTable(prevArr, nextArr) {
-    const n = prevArr.length,
-      m = nextArr.length;
-    const rows = n + 1,
-      cols = m + 1;
+    const n = prevArr.length;
+    const m = nextArr.length;
+    const rows = n + 1;
+    const cols = m + 1;
+
     const table = new Array(rows);
     table[0] = new Uint16Array(cols);
+
     for (let i = 1; i < rows; i++) {
       const row = new Uint16Array(cols);
       const pi = prevArr[i - 1];
       for (let j = 1; j < cols; j++) {
         if (pi === nextArr[j - 1]) row[j] = table[i - 1][j - 1] + 1;
-        else {
-          const a = table[i - 1][j],
-            b = row[j - 1];
-          row[j] = a > b ? a : b;
-        }
+        else row[j] = table[i - 1][j] > row[j - 1] ? table[i - 1][j] : row[j - 1];
       }
       table[i] = row;
     }
@@ -911,8 +1266,7 @@
       s < prevChars.length - p &&
       s < nextChars.length - p &&
       prevChars[prevChars.length - 1 - s] === nextChars[nextChars.length - 1 - s]
-    )
-      s++;
+    ) s++;
 
     for (let i = p; i < prevChars.length - s; i++) {
       const removed = prevAnn[i];
@@ -936,8 +1290,8 @@
     const nextChars = Array.from(nextText);
     const table = buildLcsTable(prevChars, nextChars);
 
-    let i = prevChars.length,
-      j = nextChars.length;
+    let i = prevChars.length;
+    let j = nextChars.length;
     const newAnnRev = [];
 
     while (i > 0 && j > 0) {
@@ -982,11 +1336,11 @@
     }
 
     const prevAnn = st.ann;
-    const n = prevAnn.length,
-      m = newText.length;
+    const n = prevAnn.length;
+    const m = newText.length;
 
     let newAnn;
-    if ((n + 1) * (m + 1) > CONST.MAX_DELTA_CELLS) newAnn = fastGreedyDelta(prevAnn, newText, st);
+    if ((n + 1) * (m + 1) > CONFIG.MAX_DELTA_CELLS) newAnn = fastGreedyDelta(prevAnn, newText, st);
     else newAnn = exactDeltaViaLcs(prevAnn, newText, st);
 
     st.ann = newAnn;
@@ -1003,6 +1357,9 @@
       provRLE: rleEncodeTags(tags),
     };
     saveLatestSoap(state.latestSoapNote);
+
+    // Mark note as touched so Summary regenerates when note changes
+    markNoteTouchedForCurrentMrn();
   }
 
   function restoreSectionState(section, contentText) {
@@ -1032,6 +1389,7 @@
     soap._aiMeta = soap._aiMeta || {};
     soap._editMeta = soap._editMeta || {};
     const sections = getSoapSections(soap);
+
     sections.forEach((section) => {
       const val = soap?.[section] || '';
       const textBlock = Array.isArray(val) ? val.join('\n') : String(val || '');
@@ -1045,9 +1403,9 @@
     });
   }
 
-  // =====================================================================================
-  //  TEMPLATE → ROWS SYNC (Mapping IDs)
-  // =====================================================================================
+  // =============================================================================
+  //  TEMPLATE → ROWS SYNC (edit_count per section)
+  // =============================================================================
   function syncTemplateRowsFromSections(note) {
     try {
       if (!note) return note;
@@ -1076,7 +1434,15 @@
       for (const [sectionName, mappingId] of byName.entries()) {
         const v = note?.[sectionName];
         const text = Array.isArray(v) ? v.join('\n') : String(v ?? '');
-        rows.push({ template_component_mapping_id: mappingId, text });
+
+        const editCount = clampNumber(note?._editMeta?.[sectionName]?.edits ?? 0, 0);
+
+        rows.push({
+          template_component_mapping_id: mappingId,
+          section: sectionName,
+          text,
+          edit_count: editCount,
+        });
       }
 
       note._rowsForPatientNoteInsert = rows;
@@ -1110,36 +1476,14 @@
     }
   }
 
-  // =====================================================================================
-  //  MEDICATION INLINE AVAILABILITY (unchanged)
-  // =====================================================================================
-  function ensureMedStyles() {
-    if (document.getElementById('med-inline-css')) return;
-    const s = document.createElement('style');
-    s.id = 'med-inline-css';
-    s.textContent = `
-      .med-line { display:flex; align-items:center; gap:8px; }
-      .med-emoji { font-weight: 800; display:inline-block; transform-origin:center; }
-      .med-wrap { position: relative; }
-      .med-overlay {
-        position:absolute;
-        inset:0;
-        pointer-events:none;
-        white-space: pre-wrap;
-        overflow:hidden;
-        font: inherit;
-        line-height: inherit;
-        color: inherit;
-        z-index:2;
-      }
-      @keyframes pulse { 0%,100% { transform:scale(1); opacity:1; } 50% { transform:scale(.9); opacity:.7; } }
-      .med-pending { animation: pulse 1.2s ease-in-out infinite; }
-    `;
-    document.head.appendChild(s);
-  }
-
+  // =============================================================================
+  //  MEDICATION INLINE AVAILABILITY
+  // =============================================================================
   function saveMedStatus(byName, lastText) {
-    localStorage.setItem(LS_KEYS.MED_AVAIL(), JSON.stringify({ byName: byName || {}, lastText: lastText || '' }));
+    localStorage.setItem(
+      LS_KEYS.MED_AVAIL(),
+      JSON.stringify({ byName: byName || {}, lastText: lastText || '' })
+    );
   }
 
   function loadMedStatus() {
@@ -1193,9 +1537,7 @@
       overlay = document.createElement('div');
       overlay.className = 'med-overlay';
       wrap.appendChild(overlay);
-      textarea.addEventListener('scroll', () => {
-        overlay.scrollTop = textarea.scrollTop;
-      });
+      textarea.addEventListener('scroll', () => (overlay.scrollTop = textarea.scrollTop));
     }
     return wrap;
   }
@@ -1330,15 +1672,16 @@
           row.appendChild(badge);
         }
       }
+
       frag.appendChild(row);
     }
 
     overlay.replaceChildren(frag);
   }
 
-  // =====================================================================================
-  //  NOTE PERSISTENCE (UI -> transcript item.note.data) — OVERWRITE
-  // =====================================================================================
+  // =============================================================================
+  //  NOTE PERSISTENCE (UI → history item.note.data)
+  // =============================================================================
   function persistActiveNoteFromUI() {
     const ctx = getActiveHistoryContext();
     if (!ctx.item) return;
@@ -1354,8 +1697,9 @@
     soap._aiMeta = state.latestSoapNote?._aiMeta || {};
     soap._editMeta = state.latestSoapNote?._editMeta || {};
     if (state.latestSoapNote?._templateMeta) soap._templateMeta = state.latestSoapNote._templateMeta;
-    if (Array.isArray(state.latestSoapNote?._rowsForPatientNoteInsert))
+    if (Array.isArray(state.latestSoapNote?._rowsForPatientNoteInsert)) {
       soap._rowsForPatientNoteInsert = state.latestSoapNote._rowsForPatientNoteInsert;
+    }
 
     const medTextarea = getMedicationTextarea(scroller);
     if (medTextarea) {
@@ -1378,31 +1722,6 @@
 
     state.latestSoapNote = soap;
     saveLatestSoap(state.latestSoapNote);
-  }
-
-  function resetAllEditCountersToZero() {
-    const scroller = soapContainerEnsure();
-
-    scroller.querySelectorAll('textarea[data-section]').forEach((textarea) => {
-      rebaseBoxStateToCurrent(textarea);
-      textarea.dataset.editCount = '0';
-
-      const headMeta = scroller.querySelector(
-        `.scribe-section[data-section="${CSS.escape(textarea.dataset.section)}"] .scribe-section-meta`
-      );
-      if (headMeta) headMeta.textContent = 'Edits: 0';
-    });
-
-    state.latestSoapNote._editMeta = state.latestSoapNote._editMeta || {};
-    Object.keys(state.latestSoapNote?._aiMeta || {}).forEach((section) => {
-      state.latestSoapNote._editMeta[section] = state.latestSoapNote._editMeta[section] || {};
-      state.latestSoapNote._editMeta[section].edits = 0;
-      state.latestSoapNote._editMeta[section].ins = 0;
-      state.latestSoapNote._editMeta[section].del = 0;
-    });
-
-    saveLatestSoap(state.latestSoapNote);
-    updateTotalsAndEhrState();
   }
 
   function attachEditTrackingToTextarea(box, aiText) {
@@ -1482,6 +1801,575 @@
     }
   }
 
+  function resetAllEditCountersToZero() {
+    const scroller = soapContainerEnsure();
+
+    scroller.querySelectorAll('textarea[data-section]').forEach((textarea) => {
+      rebaseBoxStateToCurrent(textarea);
+      textarea.dataset.editCount = '0';
+
+      const headMeta = scroller.querySelector(
+        `.scribe-section[data-section="${CSS.escape(textarea.dataset.section)}"] .scribe-section-meta`
+      );
+      if (headMeta) headMeta.textContent = 'Edits: 0';
+    });
+
+    state.latestSoapNote._editMeta = state.latestSoapNote._editMeta || {};
+    Object.keys(state.latestSoapNote?._aiMeta || {}).forEach((section) => {
+      state.latestSoapNote._editMeta[section] = state.latestSoapNote._editMeta[section] || {};
+      state.latestSoapNote._editMeta[section].edits = 0;
+      state.latestSoapNote._editMeta[section].ins = 0;
+      state.latestSoapNote._editMeta[section].del = 0;
+    });
+
+    saveLatestSoap(state.latestSoapNote);
+    updateTotalsAndEhrState();
+  }
+
+  // =============================================================================
+  //  AI DIAGNOSIS (UI + CACHE) — workflow preserved
+  // =============================================================================
+  function ensureAiDiagnosisPaneHeader() {
+    if (!dom.aiPane) return { head: null, btn: null };
+
+    let head = dom.aiPane.querySelector('.scribe-ai-pane-head');
+    if (!head) {
+      head = document.createElement('div');
+      head.className = 'scribe-ai-pane-head';
+      head.style.padding = '12px 14px';
+      head.style.display = 'flex';
+      head.style.justifyContent = 'flex-end';
+      dom.aiPane.insertBefore(head, dom.aiPane.firstChild);
+    }
+
+    let btn = dom.aiPane.querySelector('#aiDiagnosisGenerateBtn');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.id = 'aiDiagnosisGenerateBtn';
+      btn.className = 'scribe-ai-btn scribe-ai-btn--generate';
+      btn.type = 'button';
+      btn.textContent = 'Generate';
+      head.appendChild(btn);
+    } else if (btn.parentElement !== head) {
+      head.appendChild(btn);
+    }
+
+    if (!dom.aiDiagnosisBody) {
+      const existingBody = dom.aiPane.querySelector('#aiDiagnosisBody');
+      if (existingBody) dom.aiDiagnosisBody = existingBody;
+    }
+
+    return { head, btn };
+  }
+
+  function setAiDiagnosisButtonVisual(btn, mode) {
+    if (!btn) return;
+    btn.classList.remove('scribe-ai-btn--generate', 'scribe-ai-btn--generating', 'scribe-ai-btn--generated');
+    if (mode === 'generating') btn.classList.add('scribe-ai-btn--generating');
+    else if (mode === 'generated') btn.classList.add('scribe-ai-btn--generated');
+    else btn.classList.add('scribe-ai-btn--generate');
+  }
+
+  function getAiDiagnosisForItem(item, templateId) {
+    try {
+      const tid = normalizeTemplateId(templateId);
+      return item?.aiDiagnosisByTemplate?.[tid] || null;
+    } catch {
+      return null;
+    }
+  }
+
+
+  function getAnyAiDiagnosisForItem(item) {
+    try {
+      const bucket = item?.aiDiagnosisByTemplate;
+      if (!bucket || typeof bucket !== 'object') return null;
+
+      const arr = Object.values(bucket).filter((d) => isUsableDiagnosis(d));
+      if (!arr.length) return null;
+
+      arr.sort((a, b) => {
+        const ta = Date.parse(a?.created_at || a?.createdAt || '') || 0;
+        const tb = Date.parse(b?.created_at || b?.createdAt || '') || 0;
+        return tb - ta;
+      });
+
+      return arr[0] || null;
+    } catch {
+      return null;
+    }
+  }
+
+
+  function saveAiDiagnosisToHistoryItem(itemId, templateId, diagObj) {
+    const hist = normalizeHistoryItems(loadHistory());
+    const idx = hist.findIndex((x) => x.id === itemId);
+    if (idx === -1) return;
+
+    const tid = normalizeTemplateId(templateId);
+
+    const sections =
+      Array.isArray(diagObj?.sections)
+        ? diagObj.sections
+        : Array.isArray(diagObj?.components)
+          ? diagObj.components
+          : null;
+
+    hist[idx].aiDiagnosisByTemplate = hist[idx].aiDiagnosisByTemplate || {};
+    hist[idx].aiDiagnosisByTemplate[tid] = {
+      template_title: diagObj?.template_title || diagObj?.title || 'AI Diagnosis',
+      text: diagObj?.text || '',
+      sections: sections || null,
+      created_at: diagObj?.created_at || new Date().toISOString(),
+      template_id: tid,
+    };
+    saveHistory(hist);
+  }
+
+  function clearAiDiagnosisForHistoryItem(itemId) {
+    const hist = normalizeHistoryItems(loadHistory());
+    const idx = hist.findIndex((x) => x.id === itemId);
+    if (idx === -1) return;
+    delete hist[idx].aiDiagnosisByTemplate;
+    saveHistory(hist);
+  }
+
+  function clearAiDiagnosisForHistoryItemTemplate(itemId, templateId) {
+    const hist = normalizeHistoryItems(loadHistory());
+    const idx = hist.findIndex((x) => x.id === itemId);
+    if (idx === -1) return;
+
+    const tid = normalizeTemplateId(templateId);
+    const bucket = hist[idx].aiDiagnosisByTemplate || null;
+    if (!bucket || typeof bucket !== 'object') return;
+
+    delete bucket[tid];
+    if (!Object.keys(bucket).length) delete hist[idx].aiDiagnosisByTemplate;
+    saveHistory(hist);
+  }
+
+  // ---- Bugfix helpers: array response + case-insensitive keys ----
+  function unwrapFirstObjectResponse(data) {
+    if (Array.isArray(data)) {
+      for (const v of data) {
+        if (v && typeof v === 'object' && !Array.isArray(v)) return v;
+      }
+      return data[0] ?? null;
+    }
+    return data;
+  }
+
+  function coerceToText(v) {
+    if (v == null) return '';
+    if (Array.isArray(v)) return v.map((x) => String(x ?? '')).join('\n');
+    return String(v);
+  }
+
+  function getValueCaseInsensitive(obj, wantedKey) {
+    if (!obj || typeof obj !== 'object') return undefined;
+    const target = String(wantedKey || '').toLowerCase();
+    for (const k of Object.keys(obj)) {
+      if (String(k).toLowerCase() === target) return obj[k];
+    }
+    return undefined;
+  }
+
+  function pickFirstTextCI(obj, keys) {
+    for (const key of keys) {
+      const v = getValueCaseInsensitive(obj, key);
+      const t = normalizeTextBlock(coerceToText(v));
+      if (t) return t;
+    }
+    return '';
+  }
+
+  function normalizeDiagnosisSectionsFromResponse(data) {
+    const obj = unwrapFirstObjectResponse(data) || {};
+
+    if (Array.isArray(obj?.sections)) {
+      return obj.sections
+        .map((s) => ({
+          component: String(s?.component ?? s?.title ?? '').trim(),
+          text: normalizeTextBlock(s?.text),
+        }))
+        .filter((x) => x.component && x.text);
+    }
+
+    if (Array.isArray(obj?.components)) {
+      return obj.components
+        .map((s) => ({
+          component: String(s?.component ?? s?.title ?? '').trim(),
+          text: normalizeTextBlock(s?.text),
+        }))
+        .filter((x) => x.component && x.text);
+    }
+
+    // Supports backend keys: assessment/plan/medications (any case)
+    const out = [];
+
+    const assessment = pickFirstTextCI(obj, ['assessment', 'Assessment']);
+    if (assessment) out.push({ component: 'Assessment', text: assessment });
+
+    const plan = pickFirstTextCI(obj, ['plan', 'Plan']);
+    if (plan) out.push({ component: 'Plan', text: plan });
+
+    const meds = pickFirstTextCI(obj, ['medications', 'medication', 'Medications', 'Medication']);
+    if (meds) out.push({ component: 'Medications', text: meds });
+
+    return out;
+  }
+
+  function getRenderableDiagnosisSections(diag) {
+    const rawSections = Array.isArray(diag?.sections) ? diag.sections : normalizeDiagnosisSectionsFromResponse(diag);
+
+    const normalized = (Array.isArray(rawSections) ? rawSections : [])
+      .map((s) => ({
+        component: String(s?.component ?? s?.title ?? '').trim(),
+        text: normalizeTextBlock(s?.text),
+      }))
+      .filter((x) => x.component && x.text);
+
+    const fallbackText = normalizeTextBlock(diag?.text);
+    if (!normalized.length && fallbackText) return [{ component: 'Diagnosis', text: fallbackText }];
+
+    return normalized;
+  }
+
+  function isUsableDiagnosis(diag) {
+    if (!diag) return false;
+    const secs = getRenderableDiagnosisSections(diag);
+    return Array.isArray(secs) && secs.length > 0;
+  }
+  function renderDiagnosisSectionsHtml(sections) {
+    const list = Array.isArray(sections) ? sections : [];
+    if (!list.length) return '';
+
+    return `
+      <div class="scribe-ai-sections">
+        ${list
+        .map((sec) => {
+          const title = escapeHtml(sec?.component || sec?.title || sec?.name || 'Section');
+          const raw = String(sec?.text || sec?.content || '').trim();
+          const safe = escapeHtml(raw);
+          const body = safe.replace(/\n/g, '<br/>');
+
+          return `
+              <div class="scribe-section scribe-ai-section">
+                <div class="scribe-section-head">
+                  <h3>${title}</h3>
+                </div>
+                <div class="scribe-ai-comp-scroll">${body || '<span class="scribe-muted">No data</span>'}</div>
+              </div>
+            `;
+        })
+        .join('')}
+      </div>
+    `;
+  }
+
+  function clearAiDiagnosisPaneUi() {
+    ensureAiDiagnosisPaneHeader();
+    if (!dom.aiDiagnosisBody) return;
+    dom.aiDiagnosisBody.innerHTML = `
+      <div class="scribe-ai-center">
+        <div class="scribe-ai-empty">No data available</div>
+      </div>
+    `;
+  }
+
+  function renderAiDiagnosisInPane() {
+    const { btn } = ensureAiDiagnosisPaneHeader();
+    if (!dom.aiDiagnosisBody) return;
+
+    const ctx = getActiveHistoryContext();
+    const item = ctx.item;
+
+    if (!item) {
+      if (btn) {
+        btn.textContent = 'Generate';
+        btn.disabled = true;
+        btn.onclick = null;
+        setAiDiagnosisButtonVisual(btn, 'generate');
+      }
+      clearAiDiagnosisPaneUi();
+      return;
+    }
+
+    const templateId = getActiveTemplateIdForItem(item);
+
+    // Primary = active template; Fallback = any previously generated diagnosis for this transcript
+    const diagPrimary = getAiDiagnosisForItem(item, templateId);
+    const diagFallback = !isUsableDiagnosis(diagPrimary) ? getAnyAiDiagnosisForItem(item) : null;
+    const diag = isUsableDiagnosis(diagPrimary) ? diagPrimary : diagFallback;
+
+    const inFlightForThis =
+      state.aiDiagnosisInFlight &&
+      state.aiDiagnosisInFlightFor?.itemId === item.id &&
+      normalizeTemplateId(state.aiDiagnosisInFlightFor?.templateId) === normalizeTemplateId(templateId);
+
+    const usable = isUsableDiagnosis(diag);
+
+    if (btn) {
+      if (inFlightForThis) {
+        btn.textContent = 'Generating...';
+        btn.disabled = true;
+        btn.onclick = null;
+        setAiDiagnosisButtonVisual(btn, 'generating');
+      } else {
+        btn.textContent = 'Generate';
+        btn.disabled = false;
+        btn.onclick = () => generateAiDiagnosisForActiveTranscript();
+        setAiDiagnosisButtonVisual(btn, 'generate');
+      }
+    }
+
+    if (inFlightForThis) {
+      dom.aiDiagnosisBody.innerHTML = `
+        <div class="scribe-ai-center">
+          <div class="scribe-ai-loading">
+            <div class="scribe-spinner"></div>
+            <div style="margin-top: 12px;">AI is working in the background...</div>
+            <div class="scribe-ai-timer" style="margin-top: 8px; font-size: 18px; font-weight: bold; color: #f59e0b;">0s</div>
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    if (!usable) {
+      if (state.aiDiagnosisLastError) {
+        dom.aiDiagnosisBody.innerHTML = `<div class="scribe-ai-center"><div class="scribe-ai-error" style="color: #f59e0b; font-weight: 500;">${escapeHtml(state.aiDiagnosisLastError)}</div></div>`;
+      } else {
+        dom.aiDiagnosisBody.innerHTML = `<div class="scribe-ai-center"><div class="scribe-muted">AI diagnosis not available yet.</div></div>`;
+      }
+      return;
+    }
+
+    dom.aiDiagnosisBody.innerHTML = `
+      <div class="scribe-ai-pane-scroll">
+        ${renderDiagnosisSectionsHtml(diag.sections)}
+      </div>
+    `;
+  }
+
+  // fallback only if aiPane doesn't exist
+  function renderAiDiagnosisBox(scroller) {
+    const ctx = getActiveHistoryContext();
+    const item = ctx.item;
+    if (!item) return;
+
+    const templateId = getActiveTemplateIdForItem(item);
+    const diag = getAiDiagnosisForItem(item, templateId);
+
+    const wrap = document.createElement('div');
+    wrap.className = 'scribe-section';
+    wrap.dataset.section = '__ai_diagnosis__';
+
+    const head = document.createElement('div');
+    head.className = 'scribe-section-head';
+
+    const h = document.createElement('h3');
+    h.textContent = 'AI Diagnosis';
+
+    const btn = document.createElement('button');
+    btn.className = 'scribe-ai-btn scribe-ai-btn--generate';
+
+    const inFlightForThis =
+      state.aiDiagnosisInFlight &&
+      state.aiDiagnosisInFlightFor?.itemId === item.id &&
+      normalizeTemplateId(state.aiDiagnosisInFlightFor?.templateId) === normalizeTemplateId(templateId);
+
+    const usable = isUsableDiagnosis(diag);
+
+    if (inFlightForThis) {
+      btn.textContent = 'Generating…';
+      btn.disabled = true;
+      setAiDiagnosisButtonVisual(btn, 'generating');
+    } else if (usable) {
+      btn.textContent = 'Generated';
+      btn.disabled = true;
+      setAiDiagnosisButtonVisual(btn, 'generated');
+    } else {
+      btn.textContent = 'Generate';
+      btn.disabled = false;
+      setAiDiagnosisButtonVisual(btn, 'generate');
+      btn.onclick = () => generateAiDiagnosisForActiveTranscript();
+    }
+
+    head.appendChild(h);
+    head.appendChild(btn);
+
+    const body = document.createElement('div');
+    body.className = 'scribe-ai-body';
+
+    const inner = document.createElement('div');
+    inner.className = 'scribe-ai-body-inner';
+
+    if (inFlightForThis) {
+      inner.innerHTML = `
+        <div class="scribe-ai-center">
+          <div class="scribe-ai-loading">
+            <div class="scribe-spinner"></div>
+            <div style="margin-top: 12px;">AI is working in the background...</div>
+            <div class="scribe-ai-timer" style="margin-top: 8px; font-size: 18px; font-weight: bold; color: #f59e0b;">0s</div>
+          </div>
+        </div>
+      `;
+    } else if (state.aiDiagnosisLastError && !usable) {
+      inner.innerHTML = `<div class="scribe-ai-center"><div class="scribe-ai-error">${escapeHtml(state.aiDiagnosisLastError)}</div></div>`;
+    } else if (!usable) {
+      inner.innerHTML = `<div class="scribe-ai-center"><div class="scribe-ai-empty">No data available</div></div>`;
+    } else {
+      inner.innerHTML = renderDiagnosisSectionsHtml(getRenderableDiagnosisSections(diag));
+    }
+
+    body.appendChild(inner);
+    wrap.appendChild(head);
+    wrap.appendChild(body);
+    scroller.appendChild(wrap);
+  }
+
+  function renderAiDiagnosisUi(scrollerOrNull = null) {
+    if (dom.aiPane && dom.aiDiagnosisBody) {
+      renderAiDiagnosisInPane();
+      return;
+    }
+    if (scrollerOrNull) renderAiDiagnosisBox(scrollerOrNull);
+  }
+
+  function buildNoteSectionsPayload(note) {
+    try {
+      const sections = getSoapSections(note || {});
+      const out = [];
+
+      for (const section of sections) {
+        const raw = note?.[section];
+        const text = normalizeTextBlock(Array.isArray(raw) ? raw.join('\n') : raw);
+        if (!text) continue;
+        out.push({ component: section, text });
+      }
+
+      return out;
+    } catch {
+      return [];
+    }
+  }
+
+  // =============================================================================
+  //  SUMMARY API (cached)
+  // =============================================================================
+  function markNoteTouchedForCurrentMrn() {
+    try {
+      const mrn = String(state.currentPatient?.mrn_no || '').trim();
+      const ts = Date.now();
+
+      state.lastNoteTouchedAt = ts;
+      if (mrn) state.noteTouchedAtByMrn.set(mrn, ts);
+
+      // ✅ REMOVED:
+      // - Do NOT auto-refresh Summary even if Summary tab is active.
+      // - Summary should generate ONLY when user clicks "Summary".
+      // (So no debounce + no loadSummary() here)
+
+    } catch {
+      // ignore
+    }
+  }
+
+  function getCachedSummaryTextForMrn(mrn) {
+    if (!mrn) return '';
+    const cached = state.summaryCacheByMrn.get(String(mrn).trim());
+    return cached?.text || '';
+  }
+
+  async function generateAiDiagnosisForActiveTranscript() {
+    if (!state.SERVER_URL) return;
+
+    const ctx = getActiveHistoryContext();
+    const item = ctx.item;
+    if (!item) return;
+
+    // persist latest edits
+    try { persistActiveNoteFromUI(); } catch { }
+
+    const templateId = getActiveTemplateIdForItem(item);
+
+    // avoid parallel requests
+    if (state.aiDiagnosisInFlight) return;
+
+    // Clear any existing diagnosis to allow regeneration
+    const existing = getAiDiagnosisForItem(item, templateId);
+    if (existing) {
+      clearAiDiagnosisForHistoryItemTemplate(item.id, templateId);
+    }
+
+    const note = getActiveNoteForItem(item) || {};
+    const noteSections = buildNoteSectionsPayload(note);
+
+    const mrn = String(state.currentPatient?.mrn_no || '').trim() || null;
+    const summaryText = mrn ? getCachedSummaryTextForMrn(mrn) : '';
+
+    if (!noteSections.length || !summaryText) {
+      state.aiDiagnosisLastError = 'AI does not have enough data to provide diagnosis.';
+      renderAiDiagnosisUi(null);
+      return;
+    }
+
+    state.aiDiagnosisInFlight = true;
+    state.aiDiagnosisInFlightFor = { itemId: item.id, templateId };
+    state.aiDiagnosisLastError = null;
+    startAiDiagnosisTimer();
+    renderAiDiagnosisUi(null);
+
+    try {
+
+      const res = await fetch(`${state.SERVER_URL}${CONFIG.AI_DIAGNOSIS_ENDPOINT}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mrn,
+          transcript_id: item.id,
+          template_id: templateIdToApiValue(templateId),
+          note_sections: noteSections,
+          summary_text: summaryText || null, // cached only; never triggers summary API
+        }),
+      });
+
+      const raw = await res.json().catch(() => ({}));
+      const data = unwrapFirstObjectResponse(raw) || {};
+
+      if (!res.ok) throw new Error(data?.error || `Failed to generate AI diagnosis (${res.status})`);
+
+      const sections = getRenderableDiagnosisSections(data);
+      if (!sections.length) throw new Error('AI diagnosis response was empty. Please try again.');
+
+      const normalized = {
+        template_title: data?.template_title || 'AI Diagnosis',
+        sections,
+        text: data?.text || '',
+        created_at: new Date().toISOString(),
+      };
+
+      saveAiDiagnosisToHistoryItem(item.id, templateId, normalized);
+
+      stopAiDiagnosisTimer();
+      state.aiDiagnosisInFlight = false;
+      state.aiDiagnosisInFlightFor = null;
+      state.aiDiagnosisLastError = null;
+
+      renderAiDiagnosisUi(null);
+    } catch (e) {
+      stopAiDiagnosisTimer();
+      state.aiDiagnosisInFlight = false;
+      state.aiDiagnosisInFlightFor = null;
+      state.aiDiagnosisLastError = String(e?.message || e);
+      renderAiDiagnosisUi(null);
+    }
+  }
+
+  // =============================================================================
+  //  SOAP RENDER
+  // =============================================================================
   function renderSoapNote(soap) {
     if (state.soapGenerating) return;
 
@@ -1498,6 +2386,9 @@
     if (state.latestSoapNote?._templateMeta) syncTemplateRowsFromSections(state.latestSoapNote);
 
     saveLatestSoap(state.latestSoapNote);
+
+    // AI Diagnosis: in aiPane if present, else fallback inside SOAP
+    renderAiDiagnosisUi(scroller);
 
     const sections = getSoapSections(state.latestSoapNote);
     sections.forEach((section) => {
@@ -1528,15 +2419,14 @@
       const contentText = Array.isArray(rawVal)
         ? rawVal.join('\n')
         : typeof rawVal === 'string'
-        ? rawVal
-        : '';
+          ? rawVal
+          : '';
       box.value = contentText;
       autoExpandTextarea(box);
 
       const aiText = state.latestSoapNote?._aiMeta?.[section]?.text ?? contentText;
       state.latestSoapNote._aiMeta = state.latestSoapNote._aiMeta || {};
-      state.latestSoapNote._aiMeta[section] =
-        state.latestSoapNote._aiMeta[section] || { text: aiText };
+      state.latestSoapNote._aiMeta[section] = state.latestSoapNote._aiMeta[section] || { text: aiText };
 
       attachEditTrackingToTextarea(box, aiText);
 
@@ -1554,12 +2444,16 @@
 
     updateTotalsAndEhrState();
     renderMedicationInline();
+
     scroller.scrollTop = 0;
+
+    // keep aiPane synced
+    renderAiDiagnosisUi(null);
   }
 
-  // =====================================================================================
-  //  SOAP GENERATION (DEFAULT + TEMPLATE) — OVERWRITE TRANSCRIPT NOTE SLOT
-  // =====================================================================================
+  // =============================================================================
+  //  SOAP GENERATION VIA REST (template change)
+  // =============================================================================
   async function requestNoteGenerationForActiveTranscript(templateId) {
     if (!state.SERVER_URL) return;
 
@@ -1569,18 +2463,20 @@
     const transcript = String(ctx.item.text || '').trim();
     if (!transcript) return;
 
-    setActiveTemplateIdForItem(ctx.item, templateId);
+    const tid = normalizeTemplateId(templateId);
+
+    setActiveTemplateIdForItem(ctx.item, tid);
     ctx.hist[ctx.index] = ctx.item;
     saveHistory(ctx.hist);
     saveActiveItemId(ctx.item.id);
 
-    startSoapGenerationTimer(templateId === 'default' ? 'default' : 'template');
+    startSoapGenerationTimer();
 
     try {
       const resp = await fetch(`${state.SERVER_URL}/api/notes/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript, templateId: templateId === 'default' ? null : templateId }),
+        body: JSON.stringify({ transcript, templateId: templateIdToApiValue(tid) }),
       });
 
       if (!resp.ok) {
@@ -1594,10 +2490,10 @@
       const note = data.note || {};
 
       initializeEditMetaForSoap(note);
-      if (templateId !== 'default') syncTemplateRowsFromSections(note);
+      syncTemplateRowsFromSections(note);
 
       setActiveNoteDataForItem(ctx.item, note);
-      setActiveTemplateIdForItem(ctx.item, templateId);
+      setActiveTemplateIdForItem(ctx.item, tid);
 
       ctx.hist[ctx.index] = ctx.item;
       saveHistory(ctx.hist);
@@ -1607,8 +2503,13 @@
 
       state.latestSoapNote = note;
       saveLatestSoap(state.latestSoapNote);
+
+      // Mark note as touched so Summary regenerates for latest note
+      markNoteTouchedForCurrentMrn();
+
       renderSoapNote(state.latestSoapNote);
       syncDropdownToActiveTranscript();
+      renderAiDiagnosisUi(null);
     } catch (e) {
       stopSoapGenerationTimer();
       state.soapGenerating = false;
@@ -1617,23 +2518,29 @@
   }
 
   async function applyTemplateToActiveTranscript(newTemplateId) {
-    const templateId = String(newTemplateId || 'default');
+    const templateId = normalizeTemplateId(newTemplateId);
     setTemplateSelectValue(templateId);
+
+    // Clear old note data immediately to prevent showing wrong template sections
+    state.latestSoapNote = {};
+    renderSoapBlank();
+    clearAiDiagnosisPaneUi();
+
     await requestNoteGenerationForActiveTranscript(templateId);
   }
 
-  // =====================================================================================
-  //  TEMPLATE DROPDOWN POPULATION
-  // =====================================================================================
+  // =============================================================================
+  //  TEMPLATE DROPDOWN INIT
+  // =============================================================================
   async function initTemplateDropdown() {
     if (!dom.templateSelect || !state.SERVER_URL) return;
 
     dom.templateSelect.innerHTML = '';
 
-    const optDefault = document.createElement('option');
-    optDefault.value = 'default';
-    optDefault.textContent = 'SOAP Note';
-    dom.templateSelect.appendChild(optDefault);
+    const optSoap = document.createElement('option');
+    optSoap.value = CONFIG.SOAP_NOTE_TEMPLATE_ID;
+    optSoap.textContent = 'SOAP Note';
+    dom.templateSelect.appendChild(optSoap);
 
     try {
       const resp = await fetch(`${state.SERVER_URL}/api/templates`);
@@ -1641,24 +2548,155 @@
         const data = await resp.json();
         const templates = data.templates || [];
         templates.forEach((t) => {
+          const id = String(t.id);
+          const exists = Array.from(dom.templateSelect.options).some((o) => o.value === id);
+          if (exists) return;
+
           const opt = document.createElement('option');
-          opt.value = String(t.id);
+          opt.value = id;
           opt.textContent = t.name || t.short_name || `Template ${t.id}`;
           dom.templateSelect.appendChild(opt);
         });
       }
-    } catch {}
+    } catch {
+      // ignore
+    }
 
     syncDropdownToActiveTranscript();
 
     dom.templateSelect.onchange = () => {
-      applyTemplateToActiveTranscript(dom.templateSelect.value || 'default');
+      state.templateSelected = true;
+      applyTemplateToActiveTranscript(dom.templateSelect.value || CONFIG.SOAP_NOTE_TEMPLATE_ID);
     };
   }
 
-  // =====================================================================================
+  // =============================================================================
+  //  DEVICE LIST (throttle + watchdog)
+  // =============================================================================
+  function showNoDevices() {
+    if (!dom.deviceList) return;
+    dom.deviceList.innerHTML = '';
+    const li = document.createElement('li');
+    li.className = 'text-gray-400';
+    li.textContent = 'No devices online';
+    dom.deviceList.appendChild(li);
+  }
+
+  function requestDeviceListThrottled() {
+    const now = Date.now();
+    const minGapMs = state.currentRoom ? CONFIG.DEVICE_LIST_THROTTLE_ROOM_MS : CONFIG.DEVICE_LIST_THROTTLE_NO_ROOM_MS;
+
+    if (now - state.lastReqListAt < minGapMs) return;
+    if (state.reqListTimer) return;
+
+    state.reqListTimer = setTimeout(() => {
+      state.reqListTimer = null;
+      state.lastReqListAt = Date.now();
+      if (!state.socket?.connected) return;
+      try {
+        state.socket.emit('request_device_list');
+      } catch {
+        // ignore
+      }
+    }, 50);
+  }
+
+  function stopDeviceListWatchdog() {
+    if (state.deviceListPollTimer) {
+      clearInterval(state.deviceListPollTimer);
+      state.deviceListPollTimer = null;
+    }
+  }
+
+  function startDeviceListWatchdog() {
+    stopDeviceListWatchdog();
+    state.deviceListPollTimer = setInterval(() => {
+      if (!state.socket?.connected) return;
+      if (document.visibilityState === 'hidden') return;
+      requestDeviceListThrottled();
+    }, CONFIG.DEVICE_LIST_POLL_MS);
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') requestDeviceListThrottled();
+  });
+
+  function updateDeviceList(payload) {
+    let devices = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.devices)
+        ? payload.devices
+        : [];
+
+    // If room is set, filter device list by room when the payload includes room info
+    if (state.currentRoom && Array.isArray(devices) && devices.length) {
+      const cr = String(state.currentRoom).trim();
+      devices = devices.filter((d) => {
+        const r =
+          d?.roomId ??
+          d?.room ??
+          d?.pairId ??
+          d?.pair_id ??
+          d?.data?.roomId ??
+          d?.data?.room ??
+          d?.data?.pairId ??
+          null;
+        if (!r) return true;
+        return String(r).trim() === cr;
+      });
+    }
+
+    if (!dom.deviceList) return;
+
+    if (state.pendingEmptyDeviceListTimer) {
+      clearTimeout(state.pendingEmptyDeviceListTimer);
+      state.pendingEmptyDeviceListTimer = null;
+    }
+
+    const ids = devices
+      .map((d) => String(d?.xrId || '').trim().toUpperCase())
+      .filter(Boolean)
+      .sort();
+    const nextKey = ids.join('|');
+
+    if (nextKey && nextKey === state.lastRenderedDeviceKey) {
+      updateConnectionStatus('device_list', devices);
+      return;
+    }
+
+    if (devices.length === 0) {
+      state.pendingEmptyDeviceListTimer = setTimeout(() => {
+        state.lastRenderedDeviceKey = '';
+        showNoDevices();
+        updateConnectionStatus('device_list', []);
+        state.pendingEmptyDeviceListTimer = null;
+      }, CONFIG.EMPTY_DEVICE_DELAY_MS);
+      return;
+    }
+
+    state.lastRenderedDeviceKey = nextKey;
+    dom.deviceList.innerHTML = '';
+
+    const sorted = devices.slice().sort((a, b) => {
+      const ax = String(a?.xrId || '').trim().toUpperCase();
+      const bx = String(b?.xrId || '').trim().toUpperCase();
+      return ax.localeCompare(bx);
+    });
+
+    sorted.forEach((d) => {
+      const name = d?.deviceName || d?.name || (d?.xrId ? `Device (${d.xrId})` : 'Unknown');
+      const li = document.createElement('li');
+      li.className = 'text-gray-300';
+      li.textContent = d?.xrId ? `${name} (${d.xrId})` : name;
+      dom.deviceList.appendChild(li);
+    });
+
+    updateConnectionStatus('device_list', devices);
+  }
+
+  // =============================================================================
   //  SOCKET SIGNAL HANDLING
-  // =====================================================================================
+  // =============================================================================
   function transcriptKey(from, to) {
     return `${from || 'unknown'}->${to || 'unknown'}`;
   }
@@ -1668,6 +2706,7 @@
     if (!next) return prev;
     if (next.startsWith(prev)) return next;
     if (prev.startsWith(next)) return prev;
+
     let k = Math.min(prev.length, next.length);
     while (k > 0 && !prev.endsWith(next.slice(0, k))) k--;
     return prev + next.slice(k);
@@ -1699,10 +2738,7 @@
     renderMedicationInline();
   }
 
-
   function getPacketRoomId(packet) {
-    // Normalize room id across potential server payload shapes.
-    // Some environments may send room_id / pairId instead of roomId.
     try {
       const direct =
         packet?.roomId ??
@@ -1730,28 +2766,21 @@
 
     const msgRoom = getPacketRoomId(packet);
 
-    // Room filtering (best-effort without breaking existing workflow):
-    // Some server deployments do NOT attach roomId on `signal` payloads (especially transcript/soap events).
-    // If we hard-require msgRoom, the cockpit will silently drop transcripts/soap => "transcription not shown".
-    //
-    // Policy:
-    // 1) If msgRoom is present => enforce strict match.
-    // 2) If msgRoom is missing:
-    //    - Allow transcript_console / soap_note_console ONLY when we are currently in a room.
-    //    - Drop other packet types without msgRoom (keeps isolation for other signals).
     if (msgRoom) {
       if (state.currentRoom && msgRoom !== state.currentRoom) return;
-      // if we are not in a room yet, still allow (bootstrap) — server may be room-less early.
     } else {
       const t = String(packet.type || '');
-      const roomLessAllowed = t === 'transcript_console' || t === 'soap_note_console' || t === 'drug_availability' || t === 'drug_availability_console';
+      const roomLessAllowed =
+        t === 'transcript_console' ||
+        t === 'soap_note_console' ||
+        t === 'drug_availability' ||
+        t === 'drug_availability_console';
       if (!roomLessAllowed) return;
-      if (!state.currentRoom) {
-        // If we're not in a room yet, transcript/soap is likely not relevant to this cockpit session.
-        return;
-      }
+      // IMPORTANT: Do NOT drop transcript packets when roomId is missing; some backends send transcript_console without room metadata.
+      // If we are in a room, keep isolation; if not in a room yet, still allow transcript/soap/drug packets to preserve existing workflow.
+      if (state.currentRoom && !msgRoom) { /* allow room-less allowed types for active room */ }
+      // If currentRoom is null, we still accept these room-less allowed packets (backward compatible).
     }
-
 
     if (packet.type === 'drug_availability' || packet.type === 'drug_availability_console') {
       ingestDrugAvailabilityPayload(packet.data);
@@ -1759,11 +2788,17 @@
     }
 
     if (packet.type === 'transcript_console') {
+      if (!state.templateSelected) {
+        showTemplateSelectionModal();
+        return;
+      }
+
       const p = packet.data || {};
       const { from, to, text = '', final = false, timestamp } = p;
 
       const key = transcriptKey(from, to);
-      const slot = (state.transcriptState.byKey[key] ||= { partial: '', paragraph: '', flushTimer: null });
+      const slot =
+        (state.transcriptState.byKey[key] ||= { partial: '', paragraph: '', flushTimer: null });
 
       if (!final) {
         slot.partial = text;
@@ -1781,15 +2816,17 @@
           slot.paragraph = '';
         }
         slot.flushTimer = null;
-      }, CONST.TRANSCRIPT_FLUSH_MS);
+      }, CONFIG.TRANSCRIPT_FLUSH_MS);
 
       return;
     }
 
-    // DEFAULT SOAP NOTE event
     if (packet.type === 'soap_note_console') {
+      // Legacy handler - SOAP notes are now generated from frontend using selected template
+      // This handler is kept for backward compatibility but should not be used in normal flow
       const soap = packet.data || {};
       initializeEditMetaForSoap(soap);
+      syncTemplateRowsFromSections(soap);
 
       const hist = normalizeHistoryItems(loadHistory());
 
@@ -1799,8 +2836,10 @@
 
       const idx = hist.findIndex((x) => x.id === targetId);
       if (idx !== -1) {
-        hist[idx].note = hist[idx].note || { templateId: 'default', data: {} };
-        hist[idx].note.templateId = 'default';
+        // Use the template ID from the note data or fall back to dropdown selection
+        const templateId = soap?._templateMeta?.id || dom.templateSelect?.value || CONFIG.SOAP_NOTE_TEMPLATE_ID;
+        hist[idx].note = hist[idx].note || { templateId: templateId, data: {} };
+        hist[idx].note.templateId = templateId;
         hist[idx].note.data = soap;
       }
       saveHistory(hist);
@@ -1812,17 +2851,22 @@
       if (activeId === targetId) {
         state.latestSoapNote = soap;
         saveLatestSoap(state.latestSoapNote);
+        // Mark note as touched so Summary regenerates for latest note
+        markNoteTouchedForCurrentMrn();
         renderSoapNote(state.latestSoapNote);
-        setTemplateSelectValue('default');
+        // Use the template ID from the note data
+        const templateId = soap?._templateMeta?.id || hist[idx]?.note?.templateId || CONFIG.SOAP_NOTE_TEMPLATE_ID;
+        setTemplateSelectValue(templateId);
       }
 
+      renderAiDiagnosisUi(null);
       return;
     }
   }
 
-  // =====================================================================================
-  //  SOCKET CLIENT LOADING + CONNECTION
-  // =====================================================================================
+  // =============================================================================
+  //  SOCKET.IO CLIENT LOADING + CONNECTION
+  // =============================================================================
   function loadScript(src, timeoutMs = 8000) {
     return new Promise((resolve, reject) => {
       const s = document.createElement('script');
@@ -1862,7 +2906,9 @@
     try {
       await loadScript(endpointClient);
       if (window.io) return;
-    } catch {}
+    } catch {
+      // ignore, try CDN
+    }
 
     const CDN = 'https://cdn.socket.io/4.7.5/socket.io.min.js';
     await loadScript(CDN);
@@ -1876,37 +2922,33 @@
     stopSoapGenerationTimer();
     state.soapGenerating = false;
 
+    // clear transcript flush timers
     try {
       Object.values(state.transcriptState.byKey || {}).forEach((slot) => {
-        try {
-          if (slot?.flushTimer) clearTimeout(slot.flushTimer);
-        } catch {}
+        if (slot?.flushTimer) clearTimeout(slot.flushTimer);
       });
-    } catch {}
+    } catch {
+      // ignore
+    }
     state.transcriptState.byKey = {};
 
-    try {
-      if (dom.transcript) dom.transcript.innerHTML = '';
-    } catch {}
-    try {
-      ensureTranscriptPlaceholder();
-    } catch {}
+    if (dom.transcript) dom.transcript.innerHTML = '';
+    ensureTranscriptPlaceholder();
 
     state.currentActiveItemId = null;
     state.pendingSoapItemQueue.length = 0;
     state.latestSoapNote = {};
 
-    try {
-      renderSoapBlank();
-    } catch {}
-    try {
-      if (dom.templateSelect) setTemplateSelectValue('default');
-    } catch {}
+    renderSoapBlank();
+    if (dom.templateSelect) setTemplateSelectValue(CONFIG.SOAP_NOTE_TEMPLATE_ID);
 
-    try {
-      state.medAvailability.clear();
-    } catch {}
+    state.medAvailability.clear();
     state.medicationValidationPending = false;
+
+    state.aiDiagnosisInFlight = false;
+    state.aiDiagnosisInFlightFor = null;
+    state.aiDiagnosisLastError = null;
+    clearAiDiagnosisPaneUi();
   }
 
   function connectTo(endpointBase, onFailover) {
@@ -1922,9 +2964,7 @@
       };
 
       stopDeviceListWatchdog();
-      try {
-        state.socket?.close();
-      } catch {}
+      try { state.socket?.close(); } catch { }
 
       state.socket = window.io(state.SERVER_URL, opts);
 
@@ -1937,8 +2977,10 @@
         connected = true;
         clearTimeout(failTimer);
 
+        // reset listeners
         state.socket.off('device_list', updateDeviceList);
         state.socket.off('signal', handleSignalMessage);
+        state.socket.off('signal_message');
         state.socket.off('room_joined');
         state.socket.off('peer_left');
         state.socket.off('room_update');
@@ -1946,8 +2988,9 @@
 
         state.socket.on('device_list', updateDeviceList);
         state.socket.on('signal', handleSignalMessage);
+        // Backward/alternate event name support (some servers emit 'signal_message')
+        state.socket.on('signal_message', handleSignalMessage);
 
-        // room_update: if pairing appears, refresh device list (throttled)
         state.socket.on('room_update', ({ pairs } = {}) => {
           try {
             if (!state.COCKPIT_FOR_XR_ID) return;
@@ -1958,22 +3001,22 @@
               const b = String(p?.b || '').trim().toUpperCase();
               return a === me || b === me;
             });
-            if (inAnyPair && !state.currentRoom) {
-              requestDeviceListThrottled('room_update_pair_detected');
-            }
-          } catch {}
+            if (inAnyPair && !state.currentRoom) requestDeviceListThrottled();
+          } catch {
+            // ignore
+          }
         });
 
-        // telemetry_update: bootstrap single-device visibility before pairing
         state.socket.on('telemetry_update', (t = {}) => {
           try {
             if (!state.COCKPIT_FOR_XR_ID) return;
             const me = String(state.COCKPIT_FOR_XR_ID).trim().toUpperCase();
             const xr = String(t?.xrId || '').trim().toUpperCase();
-            if (!xr) return;
-            if (xr !== me) return;
-            if (!state.currentRoom) requestDeviceListThrottled('telemetry_bootstrap_single_device');
-          } catch {}
+            if (!xr || xr !== me) return;
+            if (!state.currentRoom) requestDeviceListThrottled();
+          } catch {
+            // ignore
+          }
         });
 
         state.socket.on('peer_left', ({ roomId } = {}) => {
@@ -1983,7 +3026,7 @@
           clearCockpitUiForRoomSwitch(prevRoom, null);
           updateDeviceList([]);
           updateConnectionStatus('peer_left', []);
-          requestDeviceListThrottled('after_peer_left');
+          requestDeviceListThrottled();
         });
 
         state.socket.on('room_joined', ({ roomId } = {}) => {
@@ -1992,21 +3035,19 @@
           clearCockpitUiForRoomSwitch(prevRoom, nextRoom);
           state.currentRoom = nextRoom;
           updateConnectionStatus('room_joined', []);
-          try {
-            restoreFromLocalStorage();
-          } catch {}
-          if (state.currentRoom) requestDeviceListThrottled('after_room_joined');
+          try { restoreFromLocalStorage(); } catch { }
+          if (state.currentRoom) requestDeviceListThrottled();
         });
 
-        // Identify cockpit using /api/platform/me
+        // identify cockpit + cache /me
         try {
           const meRes = await fetch('/api/platform/me', { credentials: 'include' });
           const me = await meRes.json();
 
-          const doctorId = me?.doctorId ?? null;
-          const scribeId = me?.scribeId ?? null;
-          window.COCKPIT_DOCTOR_ID = doctorId;
-          window.COCKPIT_SCRIBE_ID = scribeId;
+          state.me = me || null; // NEW: cache /me
+
+          window.COCKPIT_DOCTOR_ID = me?.doctorId ?? null;
+          window.COCKPIT_SCRIBE_ID = me?.scribeId ?? null;
 
           const xrId = (me?.xrId || me?.xr_id || '').toString().trim();
           state.COCKPIT_FOR_XR_ID = xrId || null;
@@ -2018,11 +3059,12 @@
               clientType: 'cockpit',
             });
           }
-        } catch {}
+        } catch {
+          // ignore
+        }
 
-        requestDeviceListThrottled('after_identify');
+        requestDeviceListThrottled();
         startDeviceListWatchdog();
-
         resolve();
       });
 
@@ -2038,9 +3080,9 @@
     });
   }
 
-  // =====================================================================================
+  // =============================================================================
   //  RESTORE FROM LOCAL STORAGE
-  // =====================================================================================
+  // =============================================================================
   function restoreFromLocalStorage() {
     if (dom.transcript) dom.transcript.innerHTML = '';
     const hist = normalizeHistoryItems(loadHistory());
@@ -2077,12 +3119,14 @@
         Object.entries(byName).forEach(([k, v]) => state.medAvailability.set(k, !!v));
       }
     }
+
     renderMedicationInline();
+    renderAiDiagnosisUi(null);
   }
 
-  // =====================================================================================
-  //  SWEETALERT2 (STRICT)
-  // =====================================================================================
+  // =============================================================================
+  //  SWEETALERT2 (strict)
+  // =============================================================================
   function getSwal() {
     const Swal2 = window.Swal;
     if (!Swal2 || typeof Swal2.fire !== 'function') return null;
@@ -2108,7 +3152,7 @@
     });
   }
 
-  function swalSuccessSaved() {
+  function swalSuccessSaved(_noteId) {
     const Swal2 = getSwal();
     if (!Swal2) return Promise.resolve({});
 
@@ -2140,12 +3184,22 @@
     });
   }
 
-  // =====================================================================================
-  //  TEMPLATE-DRIVEN NOTE → ADD TO EHR HELPERS
-  // =====================================================================================
+  // =============================================================================
+  //  ADD TO EHR HELPERS (workflow preserved; less redundant API calls)
+  // =============================================================================
   function getCurrentMrnForEhrSave() {
     try {
-      const fromWindow = window.CURRENT_MRN || window.COCKPIT_PATIENT_MRN || window.EHR_MRN || window.PATIENT_MRN || null;
+      // NEW: prefer selected EHR patient first (fast + reliable)
+      const fromState = String(state.currentPatient?.mrn_no || '').trim();
+      if (fromState) return fromState;
+
+      const fromWindow =
+        window.CURRENT_MRN ||
+        window.COCKPIT_PATIENT_MRN ||
+        window.EHR_MRN ||
+        window.PATIENT_MRN ||
+        null;
+
       if (fromWindow) {
         const v = String(fromWindow).trim();
         if (v) return v;
@@ -2180,9 +3234,15 @@
   }
 
   async function fetchMeDoctorAndScribeIds() {
+    // NEW: cache-first
+    if (state.me?.doctorId && state.me?.scribeId) {
+      return { doctorId: state.me.doctorId, scribeId: state.me.scribeId };
+    }
+
     const meRes = await fetch('/api/platform/me', { credentials: 'include' });
     if (!meRes.ok) throw new Error(`Failed to load /api/platform/me (${meRes.status})`);
     const me = await meRes.json();
+    state.me = me || null;
 
     const doctorId = me?.doctorId ?? null;
     const scribeId = me?.scribeId ?? null;
@@ -2192,13 +3252,30 @@
   }
 
   async function fetchPatientIdByMrn(mrn) {
-    const url = `/ehr/patient/${encodeURIComponent(String(mrn || '').trim())}`;
+    const m = String(mrn || '').trim();
+    if (!m) throw new Error('MRN is empty');
+
+    // NEW: if already selected in sidebar, reuse
+    if (String(state.currentPatient?.mrn_no || '').trim() === m && state.currentPatient?.patient_id) {
+      return { patientId: state.currentPatient.patient_id, patient: state.currentPatient };
+    }
+
+    // NEW: cache MRN lookups
+    if (state.patientCacheByMrn.has(m)) return state.patientCacheByMrn.get(m);
+
+    const url = `/ehr/patient/${encodeURIComponent(m)}`;
     const resp = await fetch(url, { credentials: 'include' });
     if (!resp.ok) throw new Error(`Failed to load patient (${resp.status})`);
+
     const data = await resp.json();
-    const patientId = data?.patient?.patient_id ?? null;
+    const p = data?.patient ?? null;
+
+    const patientId = p?.patient_id ?? null;
     if (!patientId) throw new Error('Missing patient.patient_id from /ehr/patient/:mrn');
-    return patientId;
+
+    const out = { patientId, patient: p };
+    state.patientCacheByMrn.set(m, out);
+    return out;
   }
 
   function getTemplateDrivenNoteFromStateOrStorage() {
@@ -2224,16 +3301,21 @@
     };
 
     const rows = Array.isArray(note?._rowsForPatientNoteInsert) ? note._rowsForPatientNoteInsert : [];
-    const contentRows = rows.map((r) => ({
-      template_component_mapping_id: r?.template_component_mapping_id ?? r?.mapping_id ?? r?.mappingId ?? null,
-      text: String(r?.text ?? ''),
-      edit_count: 0,
-      created_by: doctorId,
-      modified_by: modifiedBy,
-      created_date: timestamp,
-      modified_date: timestamp,
-      row_status: 1,
-    }));
+    const contentRows = rows.map((r) => {
+      const sectionName = String(r?.section || '').trim();
+      const derivedEditCount = sectionName ? clampNumber(note?._editMeta?.[sectionName]?.edits ?? 0, 0) : 0;
+
+      return {
+        template_component_mapping_id: r?.template_component_mapping_id ?? r?.mapping_id ?? r?.mappingId ?? null,
+        text: String(r?.text ?? ''),
+        edit_count: clampNumber(r?.edit_count ?? derivedEditCount, 0),
+        created_by: doctorId,
+        modified_by: modifiedBy,
+        created_date: timestamp,
+        modified_date: timestamp,
+        row_status: 1,
+      };
+    });
 
     return {
       doctorId,
@@ -2259,31 +3341,37 @@
     return resp.json().catch(() => ({}));
   }
 
-  // ✅ After OK: DELETE the transcript item entirely (UI + localStorage/history)
+  function notifyEhrSidebarAfterSave(snapshot) {
+    try {
+      window.dispatchEvent(new CustomEvent('ehr_note_saved', { detail: snapshot || {} }));
+    } catch {
+      // ignore
+    }
+  }
+
   function clearActiveTranscriptCompletelyAfterEhrSave() {
     const activeId = loadActiveItemId();
     if (!activeId) {
-      // still clear soap cache for safety
       state.latestSoapNote = {};
       saveLatestSoap(state.latestSoapNote);
       renderSoapBlank();
-      setTemplateSelectValue('default');
+      setTemplateSelectValue(CONFIG.SOAP_NOTE_TEMPLATE_ID);
+      clearAiDiagnosisPaneUi();
       return;
     }
 
-    // clear soap cache first (prevents stale render on edge cases)
+    // REQUIRED: clear linked AI diagnosis from UI + localStorage
+    try { clearAiDiagnosisForHistoryItem(activeId); } catch { }
+
     state.latestSoapNote = {};
     saveLatestSoap(state.latestSoapNote);
 
-    // also reset medication storage for safety
     saveMedStatus({}, '');
     state.medAvailability.clear();
     state.medicationValidationPending = false;
 
-    // delete transcript item (also updates active selection)
     deleteTranscriptItem(activeId);
 
-    // ensure soap UI is blank for the new active transcript (if any)
     const ctx = getActiveHistoryContext();
     if (ctx.item) {
       state.latestSoapNote = getActiveNoteForItem(ctx.item) || {};
@@ -2292,21 +3380,24 @@
       syncDropdownToActiveTranscript();
     } else {
       renderSoapBlank();
-      setTemplateSelectValue('default');
+      setTemplateSelectValue(CONFIG.SOAP_NOTE_TEMPLATE_ID);
+      clearAiDiagnosisPaneUi();
     }
   }
 
-  function notifyEhrSidebarAfterSave(snapshot) {
-    try {
-      window.dispatchEvent(new CustomEvent('ehr_note_saved', { detail: snapshot || {} }));
-    } catch {}
-  }
-
-  // =====================================================================================
-  //  BUTTON WIRING
-  // =====================================================================================
+  // =============================================================================
+  //  BUTTON WIRING (CLEAR / ADD TO EHR)
+  // =============================================================================
   function wireSoapActionButtons() {
     const scroller = soapContainerEnsure();
+
+    // Save button removed (auto-save)
+    if (dom.btnSave) {
+      dom.btnSave.disabled = true;
+      dom.btnSave.onclick = null;
+      dom.btnSave.style.display = 'none';
+      dom.btnSave.title = 'Auto-save is enabled';
+    }
 
     if (dom.btnClear) {
       dom.btnClear.onclick = () => {
@@ -2330,14 +3421,7 @@
         renderMedicationInline();
 
         resetAllEditCountersToZero();
-      };
-    }
-
-    if (dom.btnSave) {
-      dom.btnSave.onclick = () => {
-        persistActiveNoteFromUI();
-        scroller.querySelectorAll('textarea[data-section]').forEach((t) => rebaseBoxStateToCurrent(t));
-        resetAllEditCountersToZero();
+        renderAiDiagnosisUi(null);
       };
     }
 
@@ -2360,7 +3444,7 @@
           if (!mrn) throw new Error('Missing MRN. Please enter/select a patient MRN before saving to EHR.');
 
           const { doctorId, scribeId } = await fetchMeDoctorAndScribeIds();
-          const patientId = await fetchPatientIdByMrn(mrn);
+          const { patientId } = await fetchPatientIdByMrn(mrn);
 
           let note = getTemplateDrivenNoteFromStateOrStorage();
           note = syncTemplateRowsFromSections(note);
@@ -2389,12 +3473,21 @@
             scribeId,
             modifiedBy,
             timestamp: ts,
-            noteId: saveRes?.note_id ?? saveRes?.patient_note_id ?? saveRes?.patientNoteId ?? saveRes?.id ?? null,
+            noteId:
+              saveRes?.note_id ??
+              saveRes?.patient_note_id ??
+              saveRes?.patientNoteId ??
+              saveRes?.id ??
+              null,
           };
 
-          await swalSuccessSaved();
+          await swalSuccessSaved(saveSnapshot?.noteId);
 
-          // ✅ ONLY after OK:
+          // Invalidate summary cache immediately after successful save
+          if (saveSnapshot?.mrn && state.summaryCacheByMrn.has(saveSnapshot.mrn)) {
+            state.summaryCacheByMrn.delete(saveSnapshot.mrn);
+          }
+
           clearActiveTranscriptCompletelyAfterEhrSave();
           notifyEhrSidebarAfterSave(saveSnapshot);
         } catch (e) {
@@ -2402,6 +3495,7 @@
         } finally {
           state.addEhrInFlight = false;
           updateTotalsAndEhrState();
+          renderAiDiagnosisUi(null);
         }
       };
     }
@@ -2409,9 +3503,9 @@
     updateTotalsAndEhrState();
   }
 
-  // =====================================================================================
-  //  EHR SIDEBAR (unchanged; summary still works, just no AI diagnosis integration)
-  // =====================================================================================
+  // =============================================================================
+  //  EHR SIDEBAR (kept same behavior; Summary now cache-aware)
+  // =============================================================================
   function escapeHtmlEhr(str) {
     return String(str ?? 'N/A')
       .replaceAll('&', '&amp;')
@@ -2429,35 +3523,70 @@
 
   function persistEHRState() {
     try {
+      const isSidebarOpen = dom.ehrSidebar?.classList.contains('active') || false;
+
+      if (!state.currentPatient || !isSidebarOpen) {
+        sessionStorage.removeItem(CONFIG.EHR_STORAGE_KEY);
+        return;
+      }
+
       sessionStorage.setItem(
-        CONST.EHR_STORAGE_KEY,
+        CONFIG.EHR_STORAGE_KEY,
         JSON.stringify({
           currentPatient: state.currentPatient,
           currentNotes: state.currentNotes,
-          activeNoteId: document.querySelector('.ehr-note-item.active')?.dataset?.noteId || CONST.SUMMARY_NOTE_ID,
+          activeNoteId: document.querySelector('.ehr-note-item.active')?.dataset?.noteId || CONFIG.SUMMARY_NOTE_ID,
           noteCache: [...state.noteCache.entries()],
+          summaryCache: [...state.summaryCacheByMrn.entries()],
+          sidebarOpen: isSidebarOpen,
         })
       );
-    } catch {}
+    } catch {
+      // ignore
+    }
   }
 
   function resetEHRState() {
     if (!dom.ehrSidebar || !dom.ehrOverlay) return;
 
+    // stop any running summary UI updates
+    try { stopSummaryTimer(); } catch { }
+    try {
+      if (state.summaryRefreshDebounce) {
+        clearTimeout(state.summaryRefreshDebounce);
+        state.summaryRefreshDebounce = null;
+      }
+    } catch { }
+
+    // clear persisted EHR sidebar restore data
+    try { sessionStorage.removeItem(CONFIG.EHR_STORAGE_KEY); } catch { }
+
+    // clear runtime caches/state
+    state.currentPatient = null;
+    state.currentNotes = [];
+    state.noteCache.clear();
+
+    // optional but recommended: wipe summary-related caches so it truly starts fresh
+    try { state.summaryCacheByMrn.clear(); } catch { }
+    try { state.noteTouchedAtByMrn.clear(); } catch { }
+    state.lastNoteTouchedAt = 0;
+
+    // close + UI back to "Enter MRN"
     dom.ehrSidebar.classList.remove('active');
     dom.ehrOverlay.classList.remove('active');
 
     if (dom.ehrInitialState) dom.ehrInitialState.style.display = 'flex';
     if (dom.ehrPatientState) dom.ehrPatientState.style.display = 'none';
+
     if (dom.mrnInput) dom.mrnInput.value = '';
-    if (dom.ehrError) dom.ehrError.style.display = 'none';
+    if (dom.ehrError) {
+      dom.ehrError.textContent = '';
+      dom.ehrError.style.display = 'none';
+    }
     if (dom.notesList) dom.notesList.innerHTML = '';
     if (dom.noteDetail) dom.noteDetail.innerHTML = '';
-
-    state.currentPatient = null;
-    state.currentNotes = [];
-    state.noteCache.clear();
   }
+
 
   function renderPatient(p) {
     if (dom.ehrInitialState) dom.ehrInitialState.style.display = 'none';
@@ -2465,13 +3594,15 @@
     if (dom.patientNameDisplay) dom.patientNameDisplay.textContent = p.full_name || 'N/A';
     if (dom.patientMRNDisplay) dom.patientMRNDisplay.textContent = p.mrn_no || 'N/A';
     if (dom.patientEmailDisplay) dom.patientEmailDisplay.textContent = p.email || 'N/A';
-    if (dom.patientMobileDisplay) dom.patientMobileDisplay.textContent = p.mobile || 'N/A';
+    if (dom.patientMobileDisplay) dom.patientMobileDisplay.textContent = p.contact_no_primary || 'N/A';
   }
 
   function setActiveNote(noteId) {
     document.querySelectorAll('.ehr-note-item').forEach((el) => el.classList.remove('active'));
     const items = [...document.querySelectorAll('.ehr-note-item')];
-    const active = items.find((el) => el.dataset.noteId == noteId || (noteId === CONST.SUMMARY_NOTE_ID && el.textContent === 'Summary'));
+    const active = items.find(
+      (el) => el.dataset.noteId == noteId || (noteId === CONFIG.SUMMARY_NOTE_ID && el.textContent === 'Summary')
+    );
     if (active) active.classList.add('active');
   }
 
@@ -2485,7 +3616,7 @@
     summary.className = 'ehr-note-item';
     summary.textContent = 'Summary';
     summary.onclick = () => {
-      setActiveNote(CONST.SUMMARY_NOTE_ID);
+      setActiveNote(CONFIG.SUMMARY_NOTE_ID);
       loadSummary();
     };
     dom.notesList.appendChild(summary);
@@ -2494,8 +3625,12 @@
       const item = document.createElement('div');
       item.className = 'ehr-note-item';
       item.dataset.noteId = note.note_id;
-      item.title = note.short_name;
-      item.textContent = note.short_name;
+
+      const fullName = (note.template || note.full_name || note.long_name || note.short_name || 'Clinical Note').toString();
+      const dateLine = fmtDate(note.document_created_date);
+      item.title = `${fullName}\n${dateLine}`;
+
+      item.textContent = note.short_name || 'Clinical Note';
       item.onclick = () => {
         setActiveNote(note.note_id);
         loadNote(note.note_id);
@@ -2541,25 +3676,118 @@
     try {
       const data = await apiGetJson(`${state.SERVER_URL}/ehr/notes/${noteId}`);
       state.noteCache.set(noteId, data);
-      renderNoteDetail(data.note?.template || 'Clinical Note', data.note?.document_created_date, data.sections || [], false);
+      renderNoteDetail(
+        data.note?.template || 'Clinical Note',
+        data.note?.document_created_date,
+        data.sections || [],
+        false
+      );
     } catch {
       dom.noteDetail.innerHTML = `<div class="text-red-500 text-sm">Failed to load note</div>`;
     }
   }
 
+  function renderSummaryDetail(summaryText, title = 'AI Summary Note') {
+    if (!dom.noteDetail) return;
+
+    const raw = String(summaryText ?? '').trim();
+    const normalized = raw
+      .replace(/\r\n/g, '\n')
+      .replace(/[ \t]+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+
+    const paragraphs = (normalized ? normalized.split(/\n\s*\n/) : [])
+      .map((p) => p.replace(/[ \t]+/g, ' ').trim())
+      .filter(Boolean);
+
+    const bodyHtml = (paragraphs.length ? paragraphs : ['N/A'])
+      .map((p) => `<p style="margin:0 0 14px 0;">${escapeHtmlEhr(p)}</p>`)
+      .join('');
+
+    dom.noteDetail.innerHTML = `
+      <div style="height:100%; display:flex; flex-direction:column;">
+        <div style="
+          flex:0 0 auto;
+          padding:12px 14px;
+          text-align:center;
+          font-size:18px;
+          font-weight:800;
+          color:#FFFFFF;
+          background:transparent;
+          border-bottom:none;
+        ">
+          ${escapeHtmlEhr(title || 'AI Summary Note')}
+        </div>
+
+        <div style="
+          flex:1 1 auto;
+          min-height:0;
+          overflow-y:auto;
+          padding:14px;
+          color:#FFFFFF;
+        ">
+          <div style="
+            max-width:760px;
+            margin:0 auto;
+            font-size:14px;
+            line-height:1.8;
+            text-align:justify;
+            text-justify:inter-word;
+            hyphens:auto;
+            word-break:break-word;
+          ">
+            ${bodyHtml}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
   async function loadSummary() {
     if (!dom.noteDetail) return;
-    dom.noteDetail.innerHTML = `<div class="text-gray-400 text-sm">Generating summary...</div>`;
+    if (state.summaryGenerating) return; // prevent double-click spam
 
-    const res = await fetch(`${state.SERVER_URL}/ehr/ai/summary`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mrn: state.currentPatient?.mrn_no }),
-    });
+    const mrn = String(state.currentPatient?.mrn_no || '').trim();
+    if (!mrn) {
+      dom.noteDetail.innerHTML = `<div class="text-red-500 text-sm">MRN not selected.</div>`;
+      return;
+    }
 
-    const data = await res.json().catch(() => ({}));
-    renderNoteDetail(data.template_title || 'AI Summary', data.document_created_date, data.sections || [], true);
+    const cached = state.summaryCacheByMrn.get(mrn);
+    if (cached && cached.text) {
+      renderSummaryDetail(cached.text, cached.template_title || 'Summary Note');
+      return;
+    }
+
+    startSummaryTimer();
+
+    try {
+      const res = await fetch(`${state.SERVER_URL}/ehr/ai/summary`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mrn, _ts: Date.now() }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || data?.message || `Failed (${res.status})`);
+
+      stopSummaryTimer();
+
+      state.summaryCacheByMrn.set(mrn, {
+        text: data?.text,
+        template_title: data?.template_title || 'Summary Note',
+        fetchedAt: Date.now()
+      });
+
+      renderSummaryDetail(data?.text, data?.template_title || 'Summary Note');
+    } catch (e) {
+      stopSummaryTimer();
+      dom.noteDetail.innerHTML =
+        `<div class="text-red-500 text-sm">${escapeHtmlEhr(e?.message || 'Failed to generate summary')}</div>`;
+    }
   }
+
 
   async function searchMRN() {
     if (!dom.mrnInput || !dom.mrnSearchButton) return;
@@ -2571,7 +3799,7 @@
     dom.mrnSearchButton.textContent = 'Searching...';
 
     state.noteCache.clear();
-    sessionStorage.removeItem(CONST.EHR_STORAGE_KEY);
+    sessionStorage.removeItem(CONFIG.EHR_STORAGE_KEY);
 
     try {
       const data = await apiGetJson(`${state.SERVER_URL}/ehr/patient/${encodeURIComponent(mrn)}`);
@@ -2582,6 +3810,12 @@
         template: n.template,
         document_created_date: n.document_created_date,
       }));
+
+      // Keep patient cache warm
+      if (state.currentPatient?.mrn_no && state.currentPatient?.patient_id) {
+        const m = String(state.currentPatient.mrn_no).trim();
+        state.patientCacheByMrn.set(m, { patientId: state.currentPatient.patient_id, patient: state.currentPatient });
+      }
 
       renderPatient(state.currentPatient);
       renderClinicalNotes(state.currentNotes);
@@ -2600,12 +3834,12 @@
 
   function restoreEHRState() {
     try {
-      const raw = sessionStorage.getItem(CONST.EHR_STORAGE_KEY);
+      const raw = sessionStorage.getItem(CONFIG.EHR_STORAGE_KEY);
       if (!raw) return;
 
       const saved = JSON.parse(raw);
       if (!saved.currentPatient || !saved.currentNotes || saved.currentNotes.length === 0) {
-        sessionStorage.removeItem(CONST.EHR_STORAGE_KEY);
+        sessionStorage.removeItem(CONFIG.EHR_STORAGE_KEY);
         resetEHRState();
         return;
       }
@@ -2613,21 +3847,42 @@
       state.currentPatient = saved.currentPatient;
       state.currentNotes = saved.currentNotes || [];
       (saved.noteCache || []).forEach(([k, v]) => state.noteCache.set(k, v));
+      (saved.summaryCache || []).forEach(([k, v]) => state.summaryCacheByMrn.set(k, v));
+
+      if (state.currentPatient?.mrn_no && state.currentPatient?.patient_id) {
+        const m = String(state.currentPatient.mrn_no).trim();
+        state.patientCacheByMrn.set(m, { patientId: state.currentPatient.patient_id, patient: state.currentPatient });
+      }
+
+      if (saved.sidebarOpen && dom.ehrSidebar && dom.ehrOverlay) {
+        dom.ehrSidebar.classList.add('active');
+        dom.ehrOverlay.classList.add('active');
+      }
 
       renderPatient(state.currentPatient);
       renderClinicalNotes(state.currentNotes);
 
-      const activeId = saved.activeNoteId || CONST.SUMMARY_NOTE_ID;
+      const activeId = saved.activeNoteId || CONFIG.SUMMARY_NOTE_ID;
       setActiveNote(activeId);
 
-      if (activeId === CONST.SUMMARY_NOTE_ID) loadSummary();
+      if (activeId === CONFIG.SUMMARY_NOTE_ID) loadSummary();
       else loadNote(activeId);
-    } catch {}
+    } catch (err) {
+      console.warn('[EHR] Failed to restore state:', err);
+      sessionStorage.removeItem(CONFIG.EHR_STORAGE_KEY);
+    }
   }
 
   async function refreshPatientAndNotes(mrn) {
-    const data = await apiGetJson(`${state.SERVER_URL}/ehr/patient/${encodeURIComponent(mrn)}`);
+    state.noteCache.clear();
 
+    // Invalidate summary cache for this MRN since new notes have been added
+    const mrnKey = String(mrn).trim();
+    if (mrnKey && state.summaryCacheByMrn.has(mrnKey)) {
+      state.summaryCacheByMrn.delete(mrnKey);
+    }
+
+    const data = await apiGetJson(`${state.SERVER_URL}/ehr/patient/${encodeURIComponent(mrn)}`);
     state.currentPatient = data.patient || {};
     state.currentNotes = (data.notes || []).map((n) => ({
       note_id: n.note_id ?? n.patient_note_id,
@@ -2635,6 +3890,11 @@
       template: n.template,
       document_created_date: n.document_created_date,
     }));
+
+    if (state.currentPatient?.mrn_no && state.currentPatient?.patient_id) {
+      const m = String(state.currentPatient.mrn_no).trim();
+      state.patientCacheByMrn.set(m, { patientId: state.currentPatient.patient_id, patient: state.currentPatient });
+    }
 
     renderPatient(state.currentPatient);
     renderClinicalNotes(state.currentNotes);
@@ -2652,28 +3912,70 @@
   function wireEhrSidebar() {
     if (dom.ehrButton && dom.ehrSidebar && dom.ehrOverlay) {
       dom.ehrButton.onclick = () => {
-        dom.ehrSidebar.classList.add('active');
-        dom.ehrOverlay.classList.add('active');
+        const open = dom.ehrSidebar.classList.contains('active');
+        if (open) {
+          // close only (do not clear)
+          dom.ehrSidebar.classList.remove('active');
+          dom.ehrOverlay.classList.remove('active');
+        } else {
+          dom.ehrSidebar.classList.add('active');
+          dom.ehrOverlay.classList.add('active');
+        }
       };
     }
 
     if (dom.ehrOverlay && dom.ehrSidebar) {
       dom.ehrOverlay.onclick = () => {
+        // close only (do not clear)
         dom.ehrSidebar.classList.remove('active');
         dom.ehrOverlay.classList.remove('active');
       };
     }
 
-    if (dom.ehrCloseButton) {
+    if (dom.ehrCloseButton && dom.ehrSidebar && dom.ehrOverlay) {
       dom.ehrCloseButton.onclick = () => {
-        sessionStorage.removeItem(CONST.EHR_STORAGE_KEY);
-        resetEHRState();
+        // ✅ FULL CLEAR + back to "Enter your MRN"
+        try { stopSummaryTimer(); } catch { }
+        try {
+          if (state.summaryRefreshDebounce) {
+            clearTimeout(state.summaryRefreshDebounce);
+            state.summaryRefreshDebounce = null;
+          }
+        } catch { }
+
+        // prevent restore bringing back old patient
+        try { sessionStorage.removeItem(CONFIG.EHR_STORAGE_KEY); } catch { }
+
+        // clear runtime state
+        state.currentPatient = null;
+        state.currentNotes = [];
+        state.noteCache.clear();
+
+        // optional but recommended: clear summary-related caches too
+        try { state.summaryCacheByMrn.clear(); } catch { }
+        try { state.noteTouchedAtByMrn.clear(); } catch { }
+        state.lastNoteTouchedAt = 0;
+
+        // reset UI to initial MRN screen
+        dom.ehrSidebar.classList.remove('active');
+        dom.ehrOverlay.classList.remove('active');
+
+        if (dom.ehrInitialState) dom.ehrInitialState.style.display = 'flex';
+        if (dom.ehrPatientState) dom.ehrPatientState.style.display = 'none';
+        if (dom.mrnInput) dom.mrnInput.value = '';
+        if (dom.ehrError) {
+          dom.ehrError.textContent = '';
+          dom.ehrError.style.display = 'none';
+        }
+        if (dom.notesList) dom.notesList.innerHTML = '';
+        if (dom.noteDetail) dom.noteDetail.innerHTML = '';
       };
     }
 
     if (dom.mrnSearchButton) dom.mrnSearchButton.onclick = searchMRN;
     if (dom.mrnInput) dom.mrnInput.addEventListener('keypress', (e) => e.key === 'Enter' && searchMRN());
 
+    // keep existing persistence behavior
     window.addEventListener('beforeunload', persistEHRState);
     window.addEventListener('load', restoreEHRState);
 
@@ -2705,15 +4007,19 @@
     });
   }
 
-  // =====================================================================================
-  //  BOOT
-  // =====================================================================================
+
+  // =============================================================================
+  //  INIT / BOOT
+  // =============================================================================
   async function boot() {
     try {
       ensureUiStyles();
       ensureMedStyles();
       ensureTranscriptPlaceholder();
       showNoDevices();
+
+      ensureAiDiagnosisPaneHeader();
+      clearAiDiagnosisPaneUi();
 
       restoreFromLocalStorage();
       wireSoapActionButtons();
@@ -2726,12 +4032,18 @@
       });
 
       await initTemplateDropdown();
+      setTemplateSelectValue(getActiveTemplateIdForItem(getActiveHistoryContext().item));
+
+      showTemplateSelectionModal();
+
+      renderAiDiagnosisUi(null);
     } catch (e) {
       console.error('[SCRIBE] Failed to initialize:', e);
       setStatus('Disconnected');
       if (dom.deviceList) {
         dom.deviceList.innerHTML = `<li class="text-red-400">Could not initialize cockpit. Ensure your signaling server is live.</li>`;
       }
+      clearAiDiagnosisPaneUi();
     }
   }
 

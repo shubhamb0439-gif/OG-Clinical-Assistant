@@ -5,7 +5,7 @@
 
 :root{
   /* EHR dock width (THIS is what we resize) */
-  --ehr-sidebar-w: 360px;
+  --ehr-sidebar-w: 550px;
 
   /* Splitter */
   --splitter-size: 8px;
@@ -193,6 +193,7 @@ button { transition: background-color 0.3s; font-weight: 500; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  transition: background 0.2s ease, opacity 0.2s ease;
 }
 .scribe-btn-primary{ background:#16a34a }
 .scribe-btn-primary:hover{ background:#15803d }
@@ -203,22 +204,23 @@ button { transition: background-color 0.3s; font-weight: 500; }
    Add To EHR button states
    ========================= */
 
-/* Enabled state */
+/* Enabled state - Jet Red */
 #_scribe_add_ehr{
-  background: #2563eb; /* blue */
+  background: #950606 !important;
 }
 #_scribe_add_ehr:hover{
-  background: #1d4ed8;
+  background: #7a0505 !important;
 }
 
-/* Disabled state – ONLY when class OR disabled attribute is present */
+
+/* Disabled state - Dim Red */
 #_scribe_add_ehr.scribe-add-ehr-disabled,
 #_scribe_add_ehr:disabled{
-  background:#7f1d1d !important;
-  color:#fff !important;
-  opacity:0.95 !important;
-  cursor:not-allowed !important;
-  pointer-events:none !important;
+  background: #7f1d1d !important;
+  color: rgba(255, 255, 255, 0.5) !important;
+  opacity: 0.6 !important;
+  cursor: not-allowed !important;
+  pointer-events: none !important;
 }
 
 
@@ -497,10 +499,10 @@ body.is-resizing .ehr-resize-handle::after{
    EHR BUTTON & SIDEBAR (kept)
    ========================= */
 .ehr-button {
-  background: #667eea;
+  background: #6366f1;
   color: #fff;
   border: none;
-  border-radius: 6px;
+  border-radius: 10px;
   padding: 6px 12px;
   font-weight: 700;
   font-size: 12px;
@@ -508,7 +510,7 @@ body.is-resizing .ehr-resize-handle::after{
   transition: transform 0.25s ease, background 0.2s ease, box-shadow 0.2s ease;
   box-shadow: 0 6px 16px rgba(0,0,0,0.25);
 }
-.ehr-button:hover { background: #5568d3; }
+.ehr-button:hover { background: #4f46e5; }
 .ehr-button:active { transform: translateY(1px); }
 
 .ehr-overlay {
@@ -528,7 +530,7 @@ body.is-resizing .ehr-resize-handle::after{
   right: calc(-1 * var(--ehr-sidebar-w));
   width: var(--ehr-sidebar-w);
   height: 100vh;
-  background: #1c1c1c;
+  background: #030710;
   z-index: 999;
   box-shadow: -8px 0 26px rgba(0, 0, 0, 0.55);
   transition: right 0.35s ease;
@@ -541,7 +543,7 @@ body.is-resizing .ehr-resize-handle::after{
 /* ... keep the rest of your EHR styles unchanged ... */
 /* Header */
 .ehr-sidebar-header {
-  background: #131313;
+  background: #030710;
   padding: 12px 14px;
   border-bottom: 1px solid rgba(255,255,255,0.10);
 }
@@ -580,7 +582,7 @@ body.is-resizing .ehr-resize-handle::after{
   flex: 1;
   overflow: hidden;
   padding: 12px;
-  background: #1c1c1c;
+  background: #030710;
 }
 
 /* Initial State */
@@ -591,29 +593,35 @@ body.is-resizing .ehr-resize-handle::after{
 }
 
 .ehr-input {
-  background: #2a2a2a;
-  border: 1px solid rgba(255,255,255,0.10);
-  border-radius: 4px;
+  background: #23272f;
+  border: 1px solid #374151;
+  border-radius: 8px;
   padding: 10px;
   color: #fff;
   font-size: 12px;
 }
 .ehr-input:focus {
   outline: none;
-  border-color: rgba(102, 126, 234, 0.9);
-  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.20);
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.20);
 }
 .ehr-search-button {
-  background: #667eea;
+  background: #6366f1;
   color: #fff;
   border: none;
-  border-radius: 4px;
-  padding: 10px;
-  font-weight: 800;
+  border-radius: 10px;
+  padding: 0 16px;
+  height: 36px;
+  min-width: 132px;
+  font-weight: 700;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
+  transition: background 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
-.ehr-search-button:hover { background: #5568d3; }
+.ehr-search-button:hover { background: #4f46e5; }
 
 .ehr-error {
   background: rgba(220, 38, 38, 0.10);
@@ -633,10 +641,10 @@ body.is-resizing .ehr-resize-handle::after{
 
 /* Card */
 .ehr-card {
-  background: #2a2a2a;
-  border-radius: 8px;
+  background: #0f1419;
+  border-radius: 10px;
   padding: 12px;
-  border: 1px solid rgba(255,255,255,0.10);
+  border: 1px solid rgba(255,255,255,0.06);
 }
 .ehr-card-title {
   color: #fff;
@@ -683,7 +691,7 @@ body.is-resizing .ehr-resize-handle::after{
 .ehr-notes-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.32); }
 
 .ehr-note-item {
-  background: #333333;
+  background: #374151;
   border: 1px solid rgba(255,255,255,0.10);
   border-radius: 20px;
   padding: 6px 12px;
@@ -698,14 +706,14 @@ body.is-resizing .ehr-resize-handle::after{
   transition: all 0.15s ease;
 }
 .ehr-note-item:hover {
-  background: #3b3b3b;
+  background: #4b5563;
   color: #fff;
-  border-color: rgba(102, 126, 234, 0.65);
+  border-color: rgba(99, 102, 241, 0.65);
 }
 .ehr-note-item.active {
-  background: #667eea;
+  background: #6366f1;
   color: #fff;
-  border-color: #667eea;
+  border-color: #6366f1;
 }
 
 /* Note Content */

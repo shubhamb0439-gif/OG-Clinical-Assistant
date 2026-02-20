@@ -1594,16 +1594,17 @@ app.get('/ehr/patient/:mrn', async (req, res) => {
 
     const sqlText = `
       SELECT
-          su.id               AS patient_id,
-          su.full_name        AS full_name,
-          su.email            AS email,
-          su.mrn_no           AS mrn_no,
+          su.id                  AS patient_id,
+          su.full_name           AS full_name,
+          su.email               AS email,
+          su.mrn_no              AS mrn_no,
+          su.contact_no_primary  AS contact_no_primary,
 
-          pn.id               AS note_id,
-          pn.created_date     AS document_created_date,
+          pn.id                  AS note_id,
+          pn.created_date        AS document_created_date,
 
-          MAX(vpn.template)   AS template,
-          MAX(vpn.short_name) AS short_name
+          MAX(vpn.template)      AS template,
+          MAX(vpn.short_name)    AS short_name
 
       FROM [dbo].[System_Users] su
       LEFT JOIN [dbo].[Patient_Notes] pn
@@ -1618,6 +1619,7 @@ app.get('/ehr/patient/:mrn', async (req, res) => {
           su.full_name,
           su.email,
           su.mrn_no,
+          su.contact_no_primary,
           pn.id,
           pn.created_date
 
@@ -1637,7 +1639,8 @@ app.get('/ehr/patient/:mrn', async (req, res) => {
       patient_id: rows[0].patient_id,
       full_name: rows[0].full_name,
       email: rows[0].email,
-      mrn_no: rows[0].mrn_no
+      mrn_no: rows[0].mrn_no,
+      contact_no_primary: rows[0].contact_no_primary ?? null
     };
 
     const notes = rows
@@ -1853,7 +1856,6 @@ app.post('/ehr/ai/summary', async (req, res) => {
 
     const summary = await generateSummaryForMrn(mrn);
     return res.json(summary);
-
   } catch (err) {
     console.error('Summary Error:', err);
     return res.status(500).json({ error: 'Internal server error' });
@@ -1861,33 +1863,28 @@ app.post('/ehr/ai/summary', async (req, res) => {
 });
 
 async function generateSummaryForMrn(mrn) {
-  if (!mrn) {
-    throw new Error('MRN is required');
-  }
+  if (!mrn) throw new Error('MRN is required');
 
   const ABACUS_API_KEY = process.env.ABACUS_API_KEY;
-  if (!ABACUS_API_KEY) {
-    throw new Error('Missing ABACUS_API_KEY');
-  }
+  if (!ABACUS_API_KEY) throw new Error('Missing ABACUS_API_KEY');
 
-  // 1️ Find patient
+  const ABACUS_MODEL =
+    String(process.env.ABACUS_MODEL || '').trim() || 'claude-opus-4-6';
+
+  // 1) Find patient + NAME
   const patientRows = await sequelize.query(
-    `SELECT id AS patient_id
+    `SELECT id AS patient_id, full_name
      FROM [dbo].[System_Users]
      WHERE mrn_no = :mrn`,
-    {
-      replacements: { mrn },
-      type: Sequelize.QueryTypes.SELECT
-    }
+    { replacements: { mrn }, type: Sequelize.QueryTypes.SELECT }
   );
 
-  if (!patientRows.length) {
-    return buildEmptySummary();
-  }
+  if (!patientRows.length) return buildEmptySummary();
 
   const patientId = patientRows[0].patient_id;
+  const patientName = String(patientRows[0].full_name || '').trim();
 
-  // 2️ Fetch ALL notes with content
+  // 2) Fetch ALL notes with content (latest first)
   const rows = await sequelize.query(
     `SELECT
         pn.id AS note_id,
@@ -1900,80 +1897,92 @@ async function generateSummaryForMrn(mrn) {
        ON v.patient_note_id = pn.id
      WHERE pn.patient_id = :patientId
      ORDER BY pn.created_date DESC, pn.id DESC, v.position ASC`,
-    {
-      replacements: { patientId },
-      type: Sequelize.QueryTypes.SELECT
-    }
+    { replacements: { patientId }, type: Sequelize.QueryTypes.SELECT }
   );
 
-  if (!rows.length) {
-    return buildEmptySummary();
-  }
+  if (!rows.length) return buildEmptySummary();
 
-  // 3️ Group content by visit (note)
+  // 3) Group content by visit
   const visits = new Map();
 
   for (const r of rows) {
     if (!visits.has(r.note_id)) {
-      visits.set(r.note_id, []);
+      visits.set(r.note_id, { created_date: r.created_date, lines: [] });
     }
 
-    if (r.component || r.text) {
-      visits.get(r.note_id).push(
-        `${r.component || 'Section'}: ${r.text || 'N/A'}`
-      );
-    }
+    const text = String(r.text || '').trim();
+    if (!text) continue;
+
+    const component = String(r.component || '').trim();
+    visits.get(r.note_id).lines.push(
+      component ? `${component}: ${text}` : text
+    );
   }
 
-  // 4️ Build visits text (LATEST FIRST)
+  // 4) Build visits text
   const visitsText = [...visits.entries()]
-    .map(([noteId, lines], index) => {
-      return `VISIT ${index + 1}\n${lines.join('\n')}`;
+    .map(([noteId, v], index) => {
+      const created = v.created_date
+        ? ` | created_date: ${v.created_date}`
+        : '';
+      const body = v.lines.length ? v.lines.join('\n') : 'N/A';
+      return `VISIT ${index + 1} | note_id: ${noteId}${created}\n${body}`;
     })
     .join('\n\n');
 
-  // 5️ STANDARD + OPTIMAL PROMPT
+  // 5) Prompt with NAME RULE
   const prompt = `
-You are generating a clinical summary note.
+You are generating a comprehensive clinical summary with 100% accuracy.
 
 Use ONLY the information provided in the visits below.
-The visits belong to the same patient.
-Each visit represents a different encounter.
 
-Rules:
-- Do NOT invent or assume information.
-- Do NOT add medical interpretation beyond what is written.
-- Combine repeated information into a concise summary.
-- If information conflicts, prefer the most recent visit.
-- If information is missing across all visits, write "N/A".
-- Use professional clinical language.
-- Output MUST be valid JSON only. No markdown. No extra text.
+PATIENT NAME:
+${patientName || 'N/A'}
 
-Required Output Schema:
+CRITICAL ACCURACY RULES:
+- ONLY use facts explicitly stated in the visits.
+- Do NOT infer, extrapolate, or assume anything.
+- Do NOT invent demographics or gender unless documented.
+- If data is missing, state "not documented" or "N/A".
+
+PATIENT REFERENCE RULES (MANDATORY):
+- On FIRST mention, use the patient's full name exactly as provided.
+- After that, you may use "the patient".
+- If gender is clearly stated in visits, pronouns (he/she) may be used.
+- NEVER use the phrase "this patient".
+
+FORMATTING RULES:
+- EXACTLY ONE paragraph.
+- No headings, labels, lists, or line breaks.
+- Smooth clinical narrative style.
+
+Output MUST be valid JSON only.
+
+Required Output:
 {
   "template_title": "AI Summary Note",
-  "sections": [
-    { "component": "Chief Complaint", "text": "..." },
-    { "component": "HPI", "text": "..." },
-    { "component": "ROS", "text": "..." },
-    { "component": "Physical Exam", "text": "..." },
-    { "component": "Assessment", "text": "..." },
-    { "component": "Plan", "text": "..." },
-    { "component": "Medications", "text": "..." },
-    { "component": "Follow Up", "text": "..." }
-  ]
+  "text": "..."
 }
 
 Visits (latest first):
 ${visitsText}
 `.trim();
 
-  // 6️⃣ Single AI call
+  // 6) AI CALL
   const aiResponse = await axios.post(
     'https://routellm.abacus.ai/v1/chat/completions',
     {
-      model: 'gpt-4o',
-      messages: [{ role: 'user', content: prompt }],
+      model: ABACUS_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Return ONLY valid JSON. The text must be one paragraph. ' +
+            'Use the patient name on first mention if provided. ' +
+            'Never write "this patient".'
+        },
+        { role: 'user', content: prompt }
+      ],
       temperature: 0
     },
     {
@@ -1983,27 +1992,247 @@ ${visitsText}
   );
 
   const raw = aiResponse?.data?.choices?.[0]?.message?.content;
-  if (!raw) {
-    throw new Error('Empty AI response');
+  if (!raw) throw new Error('Empty AI response');
+
+  const parsed = parseJsonObject(raw);
+
+  if (!parsed || typeof parsed.text !== 'string') {
+    throw new Error('AI response JSON missing "text"');
   }
 
-  return JSON.parse(raw);
+  parsed.text = normalizeSingleParagraph(parsed.text);
+
+  // Safety enforcement
+  parsed.text = parsed.text.replace(/\bthis patient\b/gi, 'the patient');
+
+  // If AI ignored name on first mention, fix it
+  if (patientName) {
+    const startsWithPatient = /^the patient/i.test(parsed.text);
+    if (startsWithPatient) {
+      parsed.text = parsed.text.replace(/^the patient/i, patientName);
+    }
+  }
+
+  return parsed;
 }
+
 
 function buildEmptySummary() {
   return {
     template_title: 'AI Summary Note',
-    sections: [
-      { component: 'Chief Complaint', text: 'N/A' },
-      { component: 'HPI', text: 'N/A' },
-      { component: 'ROS', text: 'N/A' },
-      { component: 'Physical Exam', text: 'N/A' },
-      { component: 'Assessment', text: 'N/A' },
-      { component: 'Plan', text: 'N/A' },
-      { component: 'Medications', text: 'N/A' },
-      { component: 'Follow Up', text: 'N/A' }
-    ]
+    text: 'No clinical notes were found for this patient in the available records; clinical details are not documented (N/A).'
   };
+}
+
+// Helper: convert note_sections[] into a single SOAP-like text block for the model
+function noteSectionsToSoapText(noteSections) {
+  if (!Array.isArray(noteSections)) return '';
+
+  return noteSections
+    .map((s) => {
+      const component = String(s?.component || '').trim();
+      const text = String(s?.text || '').trim();
+
+      // skip empty rows
+      if (!component && !text) return '';
+
+      // Keep labels for better grounding (Chief Complaint, HPI, etc.)
+      return component ? `${component}: ${text || 'N/A'}` : (text || 'N/A');
+    })
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+// ROUTE: receives note_sections + summary_text (optional)
+app.post('/ehr/ai/diagnosis', async (req, res) => {
+  try {
+    const note_sections = req.body?.note_sections;
+    const summary_text = String(req.body?.summary_text || '').trim();
+
+    // Validate the exact fields you send from scribe cockpit
+    if (!Array.isArray(note_sections)) {
+      return res.status(400).json({ error: 'note_sections must be an array' });
+    }
+
+    // Convert note_sections -> soapText
+    const soapText = noteSectionsToSoapText(note_sections);
+    if (!soapText.trim()) {
+      return res.status(400).json({ error: 'note_sections has no usable text' });
+    }
+
+    const out = await generateDiagnosisFromContext({
+      soapText,
+      summaryText: summary_text || 'No patient summary available'
+    });
+
+    return res.json(out);
+  } catch (err) {
+    console.error('Diagnosis Error:', err);
+    return res.status(500).json({ error: err?.message || 'Internal server error' });
+  }
+});
+
+// AI CALL: uses only SOAP + Summary
+async function generateDiagnosisFromContext({ soapText, summaryText }) {
+  const ABACUS_API_KEY = process.env.ABACUS_API_KEY;
+  if (!ABACUS_API_KEY) throw new Error('Missing ABACUS_API_KEY');
+
+  const ABACUS_MODEL = String(process.env.ABACUS_MODEL || '').trim() || 'claude-opus-4-6';
+
+  const clip = (v, maxChars) => {
+    const s = (v == null ? '' : String(v));
+    if (s.length <= maxChars) return s;
+    return s.slice(0, maxChars) + '\n\n[TRUNCATED]';
+  };
+
+  const safeSummary = clip(summaryText || 'N/A', 12000);
+  const safeSoap = clip(soapText || 'N/A', 20000);
+
+  const prompt = `
+You are drafting an "Assessment", "Plan", and "Medications" section for clinician review.
+
+Use ONLY the information in the inputs below (SOAP note content and patient summary).
+Do NOT invent facts, vitals, diagnoses, labs, imaging, allergies, or medications that are not explicitly present.
+If something is not documented, write "N/A".
+Medication output must be medication reconciliation ONLY (meds explicitly mentioned). Do not add new meds.
+
+Output MUST be valid JSON only. No markdown. No extra text.
+
+Required Output Schema:
+{
+  "template_title": "AI Diagnosis",
+  "assessment": "...",
+  "plan": "...",
+  "medications": "..."
+}
+
+PATIENT SUMMARY:
+${safeSummary}
+
+SOAP NOTE:
+${safeSoap}
+`.trim();
+
+  const aiResponse = await axios.post(
+    'https://routellm.abacus.ai/v1/chat/completions',
+    {
+      model: ABACUS_MODEL,
+      messages: [
+        { role: 'system', content: 'Return ONLY valid JSON matching the schema.' },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      stream: false
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${ABACUS_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 60000,
+      validateStatus: () => true
+    }
+  );
+
+  if (aiResponse.status < 200 || aiResponse.status >= 300) {
+    const msg =
+      aiResponse?.data?.error?.message ||
+      aiResponse?.data?.message ||
+      `RouteLLM error: HTTP ${aiResponse.status}`;
+    throw new Error(msg);
+  }
+
+  const raw = aiResponse?.data?.choices?.[0]?.message?.content;
+  if (!raw) throw new Error('Empty AI response');
+
+  const parsed = (typeof parseJsonObject === 'function')
+    ? parseJsonObject(raw)
+    : JSON.parse(raw);
+
+  const norm = (v) => {
+    const s = (v == null ? '' : String(v)).trim();
+    return s || 'N/A';
+  };
+
+  return {
+    template_title: 'AI Diagnosis',
+    assessment: norm(parsed.assessment),
+    plan: norm(parsed.plan),
+    medications: norm(parsed.medications)
+  };
+}
+
+// If you DON'T already have this helper in server.js, add it once:
+function parseJsonObject(raw) {
+  const s = String(raw || '').trim();
+  const unfenced = s.replace(/^```(?:json)?\s*/i, '').replace(/```$/i, '').trim();
+  try {
+    return JSON.parse(unfenced);
+  } catch {
+    const start = unfenced.indexOf('{');
+    const end = unfenced.lastIndexOf('}');
+    if (start === -1 || end === -1 || end <= start) throw new Error('Model did not return JSON');
+    return JSON.parse(unfenced.slice(start, end + 1));
+  }
+}
+
+function normalizeSingleParagraph(text) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Extracts and parses the first JSON object from the model output.
+ * Handles accidental ```json fences or extra surrounding text.
+ */
+function parseJsonObject(raw) {
+  const s = String(raw).trim();
+
+  const unfenced = s
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```$/i, '')
+    .trim();
+
+  try {
+    return JSON.parse(unfenced);
+  } catch (_) {
+    const start = unfenced.indexOf('{');
+    const end = unfenced.lastIndexOf('}');
+    if (start === -1 || end === -1 || end <= start) {
+      throw new Error('Model did not return a JSON object');
+    }
+    return JSON.parse(unfenced.slice(start, end + 1));
+  }
+}
+
+/**
+ * Extracts and parses the first JSON object from the model output.
+ * This prevents crashes if the model accidentally adds ```json fences or extra text.
+ */
+function parseJsonObject(raw) {
+  const s = String(raw).trim();
+
+  // Strip common fenced-code wrappers if present
+  const unfenced = s
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/```$/i, '')
+    .trim();
+
+  // Try direct parse first
+  try {
+    return JSON.parse(unfenced);
+  } catch (_) {
+    // Fallback: extract between first '{' and last '}'
+    const start = unfenced.indexOf('{');
+    const end = unfenced.lastIndexOf('}');
+    if (start === -1 || end === -1 || end <= start) {
+      throw new Error('Model did not return a JSON object');
+    }
+    const candidate = unfenced.slice(start, end + 1);
+    return JSON.parse(candidate);
+  }
 }
 
 // -------------------- Login check middleware --------------------
@@ -4537,52 +4766,54 @@ function normalizeMedicationList(raw) {
 
 // -------------------- SOAP Note Generator --------------------
 async function generateSoapNote(transcript, templateId = null) {
+  const SOAP_TEMPLATE_ID = Number(process.env.SOAP_NOTE_TEMPLATE_ID || 20);
+  const ABACUS_API_KEY = process.env.ABACUS_API_KEY;
+
+  const text = String(transcript || "").trim();
+  if (!text) return { Error: ["Empty transcript"] };
+  if (!ABACUS_API_KEY) return { Error: ["Missing ABACUS_API_KEY"] };
+
+  const model = String(process.env.ABACUS_MODEL || "").trim();
+  if (!model) return { Error: ["Missing ABACUS_MODEL"] };
+
+  const tplId = (() => {
+    if (templateId === null || templateId === undefined || templateId === "default") {
+      return SOAP_TEMPLATE_ID;
+    }
+    const n = Number(templateId);
+    return Number.isFinite(n) && n > 0 ? n : SOAP_TEMPLATE_ID;
+  })();
+
+  const extractErrMsg = (err) =>
+    String(
+      err?.response?.data?.error?.message ||
+        err?.response?.data?.message ||
+        (typeof err?.response?.data === "string" ? err.response.data : "") ||
+        err?.message ||
+        "Error generating note"
+    );
+
   try {
-    const text = String(transcript || "").trim();
-    if (!text) throw new Error("Empty transcript");
+    // 1) Template meta
+    const templateRows = await sequelize.query(
+      `
+      SELECT TOP 1 id, template AS name, short_name
+      FROM [dbo].[Templates]
+      WHERE id = :templateId AND row_status = 1;
+      `,
+      { replacements: { templateId: tplId }, type: Sequelize.QueryTypes.SELECT }
+    );
 
-    // inline templateId normalization (no helper function)
-    const tplId = (() => {
-      if (templateId === null || templateId === undefined) return null;
-      if (templateId === "default") return null;
-      const n = Number(templateId);
-      return Number.isFinite(n) && n > 0 ? n : null;
-    })();
+    if (!templateRows?.length) {
+      return { Error: [`Template ${tplId} not found or inactive (row_status != 1).`] };
+    }
 
-    const defaultSections = [
-      "Chief Complaints",
-      "History of Present Illness",
-      "Subjective",
-      "Objective",
-      "Assessment",
-      "Plan",
-      "Medication",
-    ];
-
-    let sections = defaultSections;
-    let templateMeta = null;
-
-    // ONLY used for template-driven
-    let sectionToMappingId = {};
-    let orderedComponentRows = [];
-
-    if (tplId) {
-      const templateRows = await sequelize.query(
+    // 2) Components (retry if view doesn't have v.row_status)
+    let components = [];
+    try {
+      components = await sequelize.query(
         `
-        SELECT TOP 1 id, template AS name, short_name
-        FROM [dbo].[Templates]
-        WHERE id = :templateId AND row_status = 1;
-        `,
-        { replacements: { templateId: tplId }, type: Sequelize.QueryTypes.SELECT }
-      );
-
-      // ✅ Use your view to get mapping_id
-      const components = await sequelize.query(
-        `
-        SELECT
-          v.mapping_id,
-          v.component AS name,
-          v.position
+        SELECT v.mapping_id, v.component AS name, v.position
         FROM [dbo].[View_Template_Component_Mapping] v
         WHERE v.template_id = :templateId
           AND v.row_status = 1
@@ -4590,74 +4821,93 @@ async function generateSoapNote(transcript, templateId = null) {
         `,
         { replacements: { templateId: tplId }, type: Sequelize.QueryTypes.SELECT }
       );
+    } catch (e) {
+      const msg = String(e?.message || "");
+      const rowStatusMissing = /invalid column/i.test(msg) && /row_status/i.test(msg);
+      if (!rowStatusMissing) throw e;
 
-      if (templateRows.length && components.length) {
-        const seen = new Set();
-        orderedComponentRows = components
-          .map(r => ({
-            mapping_id: Number(r.mapping_id),
-            name: String(r.name || "").trim(),
-            position: Number(r.position ?? 0),
-          }))
-          .filter(r => Number.isFinite(r.mapping_id) && r.mapping_id > 0)
-          .filter(r => r.name)
-          .filter(r => (seen.has(r.name) ? false : (seen.add(r.name), true)));
-
-        if (orderedComponentRows.length) {
-          sections = orderedComponentRows.map(r => r.name);
-
-          sectionToMappingId = {};
-          for (const r of orderedComponentRows) sectionToMappingId[r.name] = r.mapping_id;
-
-          templateMeta = {
-            templateId: templateRows[0].id,
-            templateName: templateRows[0].name,
-            short_name: templateRows[0].short_name || null,
-            components: orderedComponentRows.map(r => ({
-              mapping_id: r.mapping_id,
-              name: r.name,
-              position: r.position,
-            })),
-          };
-        }
-      }
+      components = await sequelize.query(
+        `
+        SELECT v.mapping_id, v.component AS name, v.position
+        FROM [dbo].[View_Template_Component_Mapping] v
+        WHERE v.template_id = :templateId
+        ORDER BY v.position ASC;
+        `,
+        { replacements: { templateId: tplId }, type: Sequelize.QueryTypes.SELECT }
+      );
     }
 
-    const sectionListText = sections.map(s => `- ${s}`).join("\n");
+    if (!components?.length) {
+      return { Error: [`Template ${tplId} has no active components/mappings.`] };
+    }
 
+    // 3) Normalize component rows -> sections
+    const seen = new Set();
+    const orderedComponentRows = components
+      .map((r) => ({
+        mapping_id: Number(r.mapping_id),
+        name: String(r.name || "").trim(),
+        position: Number(r.position ?? 0),
+      }))
+      .filter((r) => Number.isFinite(r.mapping_id) && r.mapping_id > 0 && r.name)
+      .filter((r) => (seen.has(r.name) ? false : (seen.add(r.name), true)));
+
+    if (!orderedComponentRows.length) {
+      return { Error: [`Template ${tplId} components are invalid (missing mapping_id/name).`] };
+    }
+
+    const sections = orderedComponentRows.map((r) => r.name);
+
+    const sectionToMappingId = {};
+    for (const r of orderedComponentRows) sectionToMappingId[r.name] = r.mapping_id;
+
+    const templateMeta = {
+      templateId: templateRows[0].id,
+      templateName: templateRows[0].name,
+      short_name: templateRows[0].short_name || null,
+      components: orderedComponentRows.map((r) => ({
+        mapping_id: r.mapping_id,
+        template_component_mapping_id: r.mapping_id,
+        name: r.name,
+        position: r.position,
+      })),
+    };
+
+    // 4) Prompt
+    const sectionListText = sections.map((s) => `- ${s}`).join("\n");
     const prompt = `
-You are a clinical documentation assistant.
+                    You are a clinical documentation assistant.
 
-CRITICAL SAFETY / ACCURACY RULES (must follow):
-1) Use ONLY information explicitly present in the transcript. Do NOT assume, infer, or add details.
-2) If something is not clearly stated, write "Not mentioned in transcript" (do not guess).
-3) Preserve negations and uncertainty exactly (e.g., "denies chest pain", "possibly", "unclear").
-4) Do not invent vitals, exam findings, diagnoses, medications, dosages, allergies, PMH/PSH/FH/SH, lab/imaging results, or timelines.
-5) If the transcript is contradictory, include both statements and mark as "Conflicting in transcript".
-6) If a medication name is mentioned without dose/frequency/route, do NOT add them; record only what is said.
+                     CRITICAL RULES:
+                     - Use ONLY information explicitly present in the transcript.
+                     - If not stated, write exactly: "Not mentioned in transcript"
+                     - Preserve negations/uncertainty exactly.
+                     - Do not invent vitals, exam, diagnoses, meds, allergies, labs/imaging, or timelines.
+                     - If contradictory, include both and mark: "Conflicting in transcript"
 
-OUTPUT FORMAT (strict):
-- Return ONLY valid JSON. No markdown. No commentary.
-- Keys MUST exactly match the section names provided below (same spelling/casing).
-- Each section value MUST be an array of strings OR the exact string "Not mentioned in transcript".
+                    OUTPUT (strict):
+                    - Return ONLY valid JSON.
+                    - Keys MUST exactly match the section names below (same spelling/casing).
+                    - Each value MUST be an array of strings OR the exact string "Not mentioned in transcript".
 
-SECTION NAMES (in order):
-${sectionListText}
+                    SECTION NAMES (in order):
+                    ${sectionListText}
 
-TRANSCRIPT (raw):
-${text}
-    `.trim();
+                   TRANSCRIPT (raw):
+                  ${text}
+                `.trim();
 
-    const ABACUS_API_KEY = process.env.ABACUS_API_KEY;
-    if (!ABACUS_API_KEY) throw new Error("Missing ABACUS_API_KEY");
+    // 5) RouteLLM call (model comes ONLY from env)
+    const temperature = Number(process.env.ABACUS_TEMPERATURE || 0.1);
 
     const response = await axios.post(
       "https://routellm.abacus.ai/v1/chat/completions",
       {
-        model: (process.env.ABACUS_MODEL || "gpt-4o").trim(),
+        model,
         messages: [{ role: "user", content: prompt }],
-        temperature: Number(process.env.ABACUS_TEMPERATURE || 0.1),
+        temperature,
         stream: false,
+        response_format: { type: "json_object" },
       },
       {
         headers: {
@@ -4668,64 +4918,70 @@ ${text}
       }
     );
 
-    let raw = response?.data?.choices?.[0]?.message?.content || "{}";
-    raw = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+    // 6) Parse JSON
+    let raw = response?.data?.choices?.[0]?.message?.content ?? "{}";
+    if (typeof raw !== "string") raw = JSON.stringify(raw);
+
+    raw = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
 
     let parsed;
     try {
       parsed = JSON.parse(raw);
-    } catch (e) {
+    } catch {
       const first = raw.indexOf("{");
       const last = raw.lastIndexOf("}");
       if (first !== -1 && last !== -1) parsed = JSON.parse(raw.slice(first, last + 1));
-      else throw e;
+      else throw new Error("Model did not return valid JSON");
     }
 
+    // 7) Normalize output + attach meta for EHR insert
     const note = {};
     for (const s of sections) {
       const v = parsed?.[s];
 
       if (Array.isArray(v)) {
-        const arr = v.map(x => String(x)).filter(Boolean);
+        const arr = v.map((x) => String(x || "").trim()).filter(Boolean);
         note[s] = arr.length ? arr : "Not mentioned in transcript";
-      } else if (typeof v === "string" && v.trim()) {
-        note[s] = v.trim() === "Not mentioned in transcript" ? "Not mentioned in transcript" : [v.trim()];
+      } else if (typeof v === "string") {
+        const t = v.trim();
+        note[s] = !t
+          ? "Not mentioned in transcript"
+          : t === "Not mentioned in transcript"
+            ? "Not mentioned in transcript"
+            : [t];
       } else {
         note[s] = "Not mentioned in transcript";
       }
     }
 
-    // ✅ ONLY for template-driven: attach mapping info
-    if (templateMeta) {
-      note._templateMeta = templateMeta;
+    note._templateMeta = templateMeta;
+    note._templateComponentMappingIds = sectionToMappingId;
 
-      // mapping for saving
-      note._templateComponentMappingIds = sectionToMappingId;
+    note._rowsForPatientNoteInsert = sections.map((sectionName, idx) => {
+      const mappingId = sectionToMappingId[sectionName] ?? null;
+      const value = note[sectionName];
+      const textValue = Array.isArray(value)
+        ? value.join("\n")
+        : String(value || "Not mentioned in transcript");
 
-      // convenience rows (optional)
-      note._rowsForPatientNoteInsert = sections.map((sectionName, idx) => {
-        const mappingId = sectionToMappingId?.[sectionName] ?? null;
-        const value = note[sectionName];
-        const textValue =
-          Array.isArray(value) ? value.join("\n") : String(value || "Not mentioned in transcript");
+      return {
+        template_component_mapping_id: mappingId,
+        component: sectionName,
+        position: idx + 1,
+        text: textValue,
+      };
+    });
 
-        return {
-          template_component_mapping_id: mappingId,
-          component: sectionName,
-          position: idx + 1,
-          text: textValue,
-        };
-      });
-    }
-
-    //  Default SOAP: returns only note sections (no mapping fields)
     return note;
   } catch (err) {
-    console.error("[SOAP_NOTE] generation failed:", err?.message || err);
-    return { Error: ["Error generating note"] };
+    console.error("[SOAP_NOTE] generation failed:", extractErrMsg(err));
+    if (err?.response) {
+      console.error("[SOAP_NOTE] RouteLLM status:", err.response.status);
+      console.error("[SOAP_NOTE] RouteLLM data:", err.response.data);
+    }
+    return { Error: [extractErrMsg(err)] };
   }
 }
-
 
 // Parse Medication from SOAP note, check dbo.DrugMaster.drug, and log availability
 async function checkSoapMedicationAvailability(soapNote, opts = {}) {
@@ -5683,47 +5939,6 @@ io.on('connection', (socket) => {
         }
         io.to(pairRoomId).emit('signal', { type: 'transcript_console', from, data: out });
         dlog('[transcript] emitted signal "transcript_console" to pair room', pairRoomId);
-
-
-        // Generate SOAP note if this transcript is final
-        if (out.final && out.text) {
-          (async () => {
-            try {
-              const soapNote = await generateSoapNote(out.text);
-
-              const target = pairRoomId;
-
-              // Send SOAP note back to console UI
-              if (target) {
-                io.to(target).emit('signal', {
-                  type: 'soap_note_console',
-                  from,
-                  data: soapNote,
-                });
-              }
-              console.log('[SOAP_NOTE]', JSON.stringify(soapNote, null, 2));
-
-              // Check Medication against dbo.DrugMaster(drug) and log availability
-              const { results } = await checkSoapMedicationAvailability(soapNote, {
-                schema: 'dbo',
-                table: 'DrugMaster',
-                nameCol: 'drug',
-              });
-
-              // Emit availability to both Dock (target) and Scribe Cockpit
-              if (target) {
-                io.to(target).emit('signal', {
-                  type: 'drug_availability_console',
-                  from,
-                  data: results,
-                });
-              }
-
-            } catch (e) {
-              console.error('[SOAP/DRUG] failed:', e?.message || e);
-            }
-          })();
-        }
       } catch (e) {
         dwarn('[transcript] emit failed:', e.message);
       }
