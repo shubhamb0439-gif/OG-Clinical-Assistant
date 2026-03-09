@@ -351,7 +351,18 @@ const VIEWS_DIR = fs.existsSync(FRONTEND_VIEWS) ? FRONTEND_VIEWS : BACKEND_PUBLI
 const PUBLIC_DIR = fs.existsSync(FRONTEND_PUBLIC) ? FRONTEND_PUBLIC : BACKEND_PUBLIC;
 
 app.use('/public', express.static(PUBLIC_DIR));
-// ✅ Serve Digital Asset Links for TWA verification
+
+// ✅ Explicit route for Digital Asset Links (bypass static middleware issues)
+app.get('/.well-known/assetlinks.json', (req, res) => {
+  const filePath = path.join(PUBLIC_DIR, '.well-known', 'assetlinks.json');
+  if (fs.existsSync(filePath)) {
+    res.type('application/json').sendFile(filePath);
+  } else {
+    console.error('[assetlinks] File not found at:', filePath);
+    res.status(404).send('assetlinks.json not found');
+  }
+});
+// ✅ Serve Digital Asset Links for TWA verification (must be at root /.well-known)
 app.use('/.well-known', express.static(path.join(PUBLIC_DIR, '.well-known')));
 console.log(`[STATIC] Serving UI assets from ${PUBLIC_DIR}`);
 
