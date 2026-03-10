@@ -1473,7 +1473,20 @@ function stopVoiceRecognition() {
 function processVoiceCommand(cmd) {
     const c = cmd.toLowerCase();
 
-    if (/\b(stop|bye|goodbye|thank you|thanks|sleep|shut up)\b/.test(c)) {
+    // Check stream commands first (before "stop" or "start" trigger other actions)
+    if (/\bstart.*stream\b|\bstream.*start\b/i.test(c)) {
+        if (!streamActive) elBtnStream.click();
+        else msg('Voice', 'Stream already active.');
+        return;
+    }
+    if (/\bstop.*stream\b|\bstream.*stop\b/i.test(c)) {
+        if (streamActive) elBtnStream.click();
+        else msg('Voice', 'Stream not active.');
+        return;
+    }
+
+    // Check goodbye commands (but not if it's part of "stop stream")
+    if (/\b(bye|goodbye|thank you|thanks|sleep|shut up)\b/.test(c)) {
         msg('Voice', 'Goodbye!');
         if (orbUI) orbUI.updateResponse('Goodbye!', false);
         stopVoiceRecognition();
@@ -1530,9 +1543,6 @@ function processVoiceCommand(cmd) {
             return;
         }
     }
-
-    if (/\bstart\b/.test(c)) { if (!streamActive) elBtnStream.click(); else msg('Voice', 'Stream already active.'); return; }
-    if (/\bstop\b/.test(c)) { if (streamActive) elBtnStream.click(); else msg('Voice', 'Stream already stopped.'); return; }
 
     msg('Voice', `Unrecognized command: ${cmd}`);
 }
