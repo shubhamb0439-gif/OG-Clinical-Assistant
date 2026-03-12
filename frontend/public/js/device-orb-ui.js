@@ -22,8 +22,25 @@ export class OrbUIController {
 
   _detectMobile() {
     const ua = navigator.userAgent || '';
-    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) &&
+    const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(ua) &&
       !(/Windows NT|Macintosh|CrOS/i.test(ua));
+
+    // Also check for touch support
+    const hasTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+
+    // Check if running as PWA/TWA
+    const isPWA = window.matchMedia('(display-mode: standalone)').matches ||
+                  window.navigator.standalone ||
+                  document.referrer.includes('android-app://');
+
+    console.log('[OrbUI] Device detection:', {
+      isMobileDevice,
+      hasTouch,
+      isPWA,
+      userAgent: ua.substring(0, 50) + '...'
+    });
+
+    return isMobileDevice || (hasTouch && isPWA);
   }
 
   _initAudioContext() {
@@ -60,30 +77,53 @@ export class OrbUIController {
   }
 
   _setupMobileEvents() {
+    let touchStartTime = 0;
+    let touchMoved = false;
+
     this.micButton.addEventListener('touchstart', (e) => {
       e.preventDefault();
       this._touchHandled = true;
+      touchStartTime = Date.now();
+      touchMoved = false;
       this._startVoice();
+      console.log('[OrbUI] Touch start - voice starting');
+    }, { passive: false });
+
+    this.micButton.addEventListener('touchmove', (e) => {
+      touchMoved = true;
     }, { passive: false });
 
     this.micButton.addEventListener('touchend', (e) => {
       e.preventDefault();
-      this._stopVoice();
+      const touchDuration = Date.now() - touchStartTime;
+      console.log('[OrbUI] Touch end - duration:', touchDuration, 'ms, moved:', touchMoved);
+
+      // If it was a very short tap (less than 100ms) and didn't move, treat as toggle instead
+      if (touchDuration < 100 && !touchMoved) {
+        console.log('[OrbUI] Quick tap detected, treating as toggle');
+        this._toggleVoice();
+      } else {
+        this._stopVoice();
+      }
+
       setTimeout(() => { this._touchHandled = false; }, 300);
     }, { passive: false });
 
     this.micButton.addEventListener('touchcancel', (e) => {
       e.preventDefault();
+      console.log('[OrbUI] Touch cancelled');
       this._stopVoice();
       setTimeout(() => { this._touchHandled = false; }, 300);
     }, { passive: false });
 
+    // Fallback for devices that don't fire touch events properly (some Android WebView versions)
     this.micButton.addEventListener('click', (e) => {
       if (this._touchHandled) {
         e.preventDefault();
         e.stopPropagation();
         return;
       }
+      console.log('[OrbUI] Click event (fallback)');
       this._toggleVoice();
     });
   }
@@ -108,7 +148,6 @@ export class OrbUIController {
 
     this.isListening = true;
     this._updateUI(true);
-    await this._startMicAnalyser();
   }
 
   _stopVoice() {
@@ -123,7 +162,6 @@ export class OrbUIController {
 
     this.isListening = false;
     this._updateUI(false);
-    this._stopMicAnalyser();
   }
 
   async _startMicAnalyser() {
@@ -205,11 +243,6 @@ export class OrbUIController {
     if (this.isListening !== listening) {
       this.isListening = listening;
       this._updateUI(listening);
-      if (listening) {
-        this._startMicAnalyser();
-      } else {
-        this._stopMicAnalyser();
-      }
     }
   }
 
