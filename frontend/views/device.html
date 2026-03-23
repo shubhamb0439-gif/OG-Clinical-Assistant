@@ -97,13 +97,10 @@
 
         <!-- Response box -->
         <div class="resp" id="responseCard">
-            <div class="pbtn" id="btnAudio" style="cursor:pointer;">
-                <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                    <path d="M2.5 1.5L11 6.5L2.5 11.5V1.5Z" fill="rgba(0,207,255,.92)" />
-                </svg>
-            </div>
             <div class="rtxt" id="responseText">Your XR assistant response appears here...</div>
         </div>
+
+
 
         <!-- Mic button -->
         <div class="mic-wrap">
@@ -156,7 +153,6 @@
                     </svg>
                     <span>Mute</span>
                 </button>
-
                 <button class="control-btn" id="manualVideoBtn" data-action="video">
                     <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                         <rect x="2" y="4" width="9" height="8" rx="1" stroke="currentColor" stroke-width="1.5" />
@@ -164,7 +160,16 @@
                     </svg>
                     <span>Hide Video</span>
                 </button>
+
+                <button class="control-btn audio-btn-panel" id="btnAudio" disabled
+                    title="Enabled when scribe plays summary">
+                    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
+                        <path d="M2.5 1.5L11 6.5L2.5 11.5V1.5Z" fill="currentColor" />
+                    </svg>
+                    <span id="audioLabel">Audio</span>
+                </button>
             </div>
+
 
             <!-- Messages Section -->
             <div class="messages-section">
@@ -251,6 +256,33 @@
             deferredPrompt = null;
         });
     </script>
+
+    <!-- Platform logout cross-tab listener -->
+    <script>
+        (function () {
+            function handleXrLogout() {
+                console.log('[DEVICE] Platform logout detected, closing tab');
+                try { window.close(); } catch (e) { }
+                setTimeout(function () { window.location.href = '/platform'; }, 300);
+            }
+
+            try {
+                if (typeof BroadcastChannel !== 'undefined') {
+                    var ch = new BroadcastChannel('xr_platform_auth');
+                    ch.onmessage = function (e) {
+                        if (e.data && e.data.type === 'xr_logout') handleXrLogout();
+                    };
+                } else {
+                    window.addEventListener('storage', function (e) {
+                        if (e.key === 'xr_logout_signal') handleXrLogout();
+                    });
+                }
+            } catch (err) {
+                console.warn('[DEVICE] Logout listener setup failed:', err);
+            }
+        })();
+    </script>
+
 
     <!-- ✅ MANUAL LOGOUT: Logout button handler -->
     <script>
