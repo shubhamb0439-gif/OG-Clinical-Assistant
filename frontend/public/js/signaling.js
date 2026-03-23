@@ -358,7 +358,13 @@ export class SignalingClient {
   }
 
 
-  _onDeviceList(arr) {
+  _onDeviceList(payload) {
+    let arr = payload;
+
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      arr = payload.devices || [];
+    }
+
     if (!Array.isArray(arr)) return;
     const list = [];
     let desktopOnline = false;
@@ -377,7 +383,6 @@ export class SignalingClient {
     // (Server enforces strict 1:1 pairing anyway.)
     this.currentDesktopId = (list[0]?.[1]) || null;
 
-
     // Fire single "desktop_disconnected" on transition (parity with Android)
     if (this.DESKTOP_ID && this._wasDesktopOnline && !desktopOnline) {
       const notice = { xrId: this.DESKTOP_ID, message: `Desktop [${this.DESKTOP_ID}] disconnected.` };
@@ -388,6 +393,7 @@ export class SignalingClient {
 
     this.listener?.onDeviceListUpdated?.(list);
   }
+
 
   _onPeerLeft(obj) {
     const xrId = obj?.xrId;

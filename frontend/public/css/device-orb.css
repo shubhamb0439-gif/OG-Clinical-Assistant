@@ -175,6 +175,15 @@ html,body{
   box-shadow:0 0 10px rgba(0,200,255,.18);cursor:pointer;
 }
 .pbtn svg{margin-left:2px}
+.audio-ctrl-wrap{
+  display:flex;flex-direction:column;align-items:center;gap:4px;flex-shrink:0;
+}
+.audio-lbl{
+  font-family:'Exo 2',sans-serif;font-size:9px;font-weight:400;
+  color:rgba(0,200,255,.7);letter-spacing:1px;text-transform:uppercase;
+  white-space:nowrap;
+}
+
 .rtxt{
   font-family:'Exo 2',sans-serif;font-size:13px;font-weight:300;
   color:rgba(255,255,255,.72);line-height:1.5;
@@ -552,3 +561,22 @@ html,body{
   color:#888;
   margin-top:2px;
 }
+
+.audio-btn-panel:disabled{
+  opacity:0.38;
+  cursor:not-allowed;
+  pointer-events:none;
+}
+.audio-btn-panel:disabled:hover{
+  transform:none;
+  background:rgba(0,210,255,0.15);
+  border-color:rgba(0,210,255,0.4);
+  box-shadow:none;
+}
+.audio-btn-panel.playing{
+  background:rgba(0,207,255,0.22);
+  border-color:rgba(0,207,255,0.7);
+  box-shadow:0 0 14px rgba(0,207,255,0.38);
+  color:#00cfff;
+}
+
