@@ -510,7 +510,8 @@ function scheduleAutoReload(reason = 'unknown') {
 
     const now = Date.now();
     const last = Number(sessionStorage.getItem('lastAutoReloadTs') || 0);
-    if (now - last < MIN_RELOAD_INTERVAL_MS) {
+    const isManual = reason === 'user';
+    if (!isManual && now - last < MIN_RELOAD_INTERVAL_MS) {
         console.warn('[AUTO-RELOAD] Skipping (interval guard).', { sinceMs: now - last });
         return;
     }
@@ -1662,41 +1663,42 @@ function processVoiceCommand(cmd) {
         return;
     }
 
-    const isAudioCmd = /\bpause\b/.test(c) || /\bresume\b/.test(c) || /\bplay\b/.test(c) ||
-        /\bstop.*(audio|play|music|sound)\b/.test(c) ||
-        /\b(audio|play|music|sound).*stop\b/.test(c);
+    const isPauseAudioCmd = /\bpause\b/.test(c) || /\bstop.*(audio|play|music|sound)\b/.test(c) || /\b(audio|play|music|sound).*stop\b/.test(c);
+    const isPlayAudioCmd = (/\bplay\b/.test(c) || /\bresume\b/.test(c)) && !isPauseAudioCmd;
 
-    if (isAudioCmd || (/\bpause\b/.test(c) || /\bresume\b/.test(c))) {
-        if (/\bpause\b/.test(c) || /\bstop.*(audio|play|music|sound)\b/.test(c)) {
-            if (currentAudio && !currentAudio.paused && !currentAudio.ended) {
-                toggleAudioPlayback();
-                msg('Voice', 'Pausing audio');
-                if (orbUI) orbUI.updateResponse('Pausing audio', false);
-            } else if (!currentAudio) {
-                msg('Voice', 'No audio to pause');
-            } else {
-                msg('Voice', 'Audio already paused');
-            }
-            return;
+    if (isPauseAudioCmd) {
+        if (currentAudio && !currentAudio.paused && !currentAudio.ended) {
+            const _btn = document.getElementById('btnAudio');
+            if (_btn) { _btn.click(); } else { toggleAudioPlayback(); }
+            msg('Voice', 'Pausing audio');
+            if (orbUI) orbUI.updateResponse('Pausing audio', false);
+        } else if (!currentAudio) {
+            msg('Voice', 'No audio to pause');
+        } else {
+            msg('Voice', 'Audio already paused');
         }
-        if (/\bplay\b/.test(c) || /\bresume\b/.test(c)) {
-            if (currentAudio && currentAudio.paused && !currentAudio.ended) {
-                toggleAudioPlayback();
-                msg('Voice', 'Resuming audio');
-                if (orbUI) orbUI.updateResponse('Resuming audio', false);
-            } else if (!currentAudio) {
-                msg('Voice', 'No audio to play');
-            } else if (currentAudio.ended) {
-                msg('Voice', 'Audio has finished');
-            } else {
-                msg('Voice', 'Audio already playing');
-            }
-            return;
+        return;
+    }
+
+    if (isPlayAudioCmd) {
+        if (currentAudio && currentAudio.paused && !currentAudio.ended) {
+            const _btn = document.getElementById('btnAudio');
+            if (_btn) { _btn.click(); } else { toggleAudioPlayback(); }
+            msg('Voice', 'Resuming audio');
+            if (orbUI) orbUI.updateResponse('Resuming audio', false);
+        } else if (!currentAudio) {
+            msg('Voice', 'No audio to play');
+        } else if (currentAudio.ended) {
+            msg('Voice', 'Audio has finished');
+        } else {
+            msg('Voice', 'Audio already playing');
         }
+        return;
     }
 
     msg('Voice', `Unrecognized command: ${cmd}`);
 }
+
 
 
 
