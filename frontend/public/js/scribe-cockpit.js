@@ -4621,7 +4621,7 @@
 
         state.socket.emit('play_audio_on_device', {
           audio: data.audio,
-          contentType: data.contentType || 'audio/wav',
+          contentType: data.contentType || 'audio/mpeg',
           room: state.currentRoom
         });
 
@@ -5103,6 +5103,8 @@
       }
     });
   }
+
+
   // =============================================================================
   //  INIT / BOOT
   // =============================================================================
