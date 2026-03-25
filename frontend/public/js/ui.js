@@ -845,9 +845,10 @@ function createSignaling() {
         // Same "signal" handling as MainActivity.kt
         onSignal: (type, from, _to, data) => {
             if (type === 'offer') {
-                console.debug('Ignoring unexpected OFFER (web device is the offerer).');
+                streamer?.onRemoteOfferReceived(data, from);
                 return;
             }
+
             if (type === 'answer') {
                 streamer?.onRemoteAnswerReceived(data, from);
                 return;
