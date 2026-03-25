@@ -1,6 +1,8 @@
 // public/js/voice.js
-// VoiceController: Web Speech API wrapper matching your Android SpeechRecognizer flow.
-// - Commands recognized (case-insensitive):
+// Azure Speech STT VoiceController: MediaRecorder-based WAV recording with server-side transcription
+// Replaces Web Speech API with Azure Cognitive Services Speech-to-Text
+//
+// Commands recognized (case-insensitive):
 //   connect, disconnect
 //   start stream, stop stream
 //   mute (mic), unmute (mic)
@@ -21,7 +23,7 @@
 //     onCommand: (a, t) => console.log(a, t),
 //     onTranscript: (txt, fin) => console.log(fin ? 'FINAL' : 'PART', txt),
 //   });
-//   voice.start(); // must be triggered from a user gesture in most browsers
+//   voice.start(); // must be triggered from a user gesture
 
 export class VoiceController {
   /**
@@ -50,14 +52,11 @@ export class VoiceController {
 
     this._customMap = Array.isArray(opts.customMap) ? opts.customMap : [];
 
-    this._SR = (typeof window !== 'undefined')
-      ? (window.SpeechRecognition || window.webkitSpeechRecognition || null)
-      : null;
-
-    this._rec = null;
+    this._mediaRecorder = null;
+    this._audioStream = null;
+    this._audioChunks = [];
     this._listening = false;
     this._lastPartialAt = 0;
-    this._lastResultIndex = 0;
 
     this._noteMode = false;
     this._noteBuffer = '';
@@ -66,29 +65,82 @@ export class VoiceController {
   }
 
   static isAvailable() {
-    return !!(typeof window !== 'undefined' && (window.SpeechRecognition || window.webkitSpeechRecognition));
-    // For broader coverage, consider swapping to Azure/Vosk when unavailable.
+    return !!(typeof window !== 'undefined' && 
+              navigator.mediaDevices && 
+              navigator.mediaDevices.getUserMedia &&
+              window.MediaRecorder);
   }
 
   isListening() { return this._listening; }
 
   setLanguage(lang) {
     this.lang = lang || 'en-US';
-    if (this._rec) this._rec.lang = this.lang;
   }
 
-  start() {
-    if (!this._SR) { this.onError('speech_api_unavailable'); return false; }
+  async start() {
     if (this._listening) return true;
 
-    if (!this._rec) this._setup();
-
     try {
-      this._rec.start();
+      // Request microphone access
+      this._audioStream = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          channelCount: 1,
+          sampleRate: 16000,
+          echoCancellation: true,
+          noiseSuppression: true
+        } 
+      });
+
+      // Create MediaRecorder for WAV recording
+      const mimeType = this._getBestMimeType();
+      this._mediaRecorder = new MediaRecorder(this._audioStream, {
+        mimeType: mimeType,
+        audioBitsPerSecond: 16000
+      });
+
+      this._audioChunks = [];
+
+      this._mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          this._audioChunks.push(event.data);
+        }
+      };
+
+      this._mediaRecorder.onstop = async () => {
+        if (this._audioChunks.length === 0) return;
+
+        try {
+          // Combine audio chunks
+          const audioBlob = new Blob(this._audioChunks, { type: mimeType });
+          
+          // Convert to WAV if needed
+          const wavBlob = await this._convertToWAV(audioBlob);
+          
+          // Send to server for transcription
+          await this._transcribeAudio(wavBlob);
+          
+          // Clear chunks and restart recording if continuous
+          this._audioChunks = [];
+          if (this._listening && this.continuous) {
+            this._mediaRecorder.start();
+          }
+        } catch (error) {
+          this.onError(this._errString(error));
+        }
+      };
+
+      // Start recording
+      this._mediaRecorder.start();
+      
+      // Auto-stop and restart for continuous transcription
+      if (this.continuous) {
+        this._startContinuousRecording();
+      }
+
       this._listening = true;
-      this._lastResultIndex = 0;
       this.onListenStateChange(true);
       return true;
+
     } catch (e) {
       this._listening = false;
       this.onListenStateChange(false);
@@ -98,139 +150,191 @@ export class VoiceController {
   }
 
   stop() {
-    if (!this._rec) return;
-    // Set listening to false BEFORE stopping to prevent auto-restart
+    if (!this._listening) return;
+
     this._listening = false;
-    try { this._rec.stop(); } catch { }
+
+    if (this._continuousTimer) {
+      clearInterval(this._continuousTimer);
+      this._continuousTimer = null;
+    }
+
+    if (this._mediaRecorder && this._mediaRecorder.state !== 'inactive') {
+      this._mediaRecorder.stop();
+    }
+
+    if (this._audioStream) {
+      this._audioStream.getTracks().forEach(track => track.stop());
+      this._audioStream = null;
+    }
+
     this.onListenStateChange(false);
-    // If we were in note mode, finalize
+
+    // If in note mode, finalize
     if (this._noteMode) this._emitStopNote();
   }
 
   destroy() {
     try { this.stop(); } catch { }
-    this._rec = null;
+    this._mediaRecorder = null;
   }
 
   // ---------------------- internals ----------------------
 
   _bindHandlers() {
-    this._onResult = this._onResult.bind(this);
-    this._onError = this._onError.bind(this);
-    this._onEnd = this._onEnd.bind(this);
+    // Handlers are already bound in the constructor
   }
 
-  _setup() {
-    this._rec = new this._SR();
-    this._rec.lang = this.lang;
-    this._rec.continuous = this.continuous;
-    this._rec.interimResults = this.interimResults;
+  _getBestMimeType() {
+    // Prefer WAV if supported, otherwise use webm/opus
+    const types = [
+      'audio/wav',
+      'audio/webm;codecs=opus',
+      'audio/ogg;codecs=opus',
+      'audio/mp4'
+    ];
 
-    this._rec.onresult = this._onResult;
-    this._rec.onerror = this._onError;
-    this._rec.onend = this._onEnd;
-  }
-
-  _onResult(e) {
-    // Guard: only process if we're actively listening
-    if (!this._listening) return;
-
-    // Process only new results (prevents duplicates on restart)
-    let interim = '';
-    let finalTxt = '';
-    let hasNewFinal = false;
-
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const res = e.results[i];
-      const txt = (res[0]?.transcript || '').trim();
-      if (!txt) continue;
-
-      if (res.isFinal) {
-        finalTxt += (finalTxt ? ' ' : '') + txt.toLowerCase();
-        hasNewFinal = true;
-      } else {
-        interim += (interim ? ' ' : '') + txt.toLowerCase();
+    for (const type of types) {
+      if (MediaRecorder.isTypeSupported(type)) {
+        return type;
       }
     }
 
-    // Partial transcript throttling
-    if (interim && this._listening) {
-      const now = Date.now();
-      if (now - this._lastPartialAt >= this.partialThrottleMs) {
-        this._lastPartialAt = now;
-        // Apply MRN formatting to interim transcripts
-        const formattedInterim = this._formatMRN(interim);
-        if (this._noteMode) {
-          // Note mode buffers partials locally, still notify UI
-          this.onTranscript(formattedInterim, false);
-        } else {
-          this.onTranscript(formattedInterim, false);
-        }
-      }
+    return ''; // Browser will use default
+  }
+
+  async _convertToWAV(blob) {
+    // If already WAV, return as-is
+    if (blob.type.includes('wav')) {
+      return blob;
     }
 
-    if (hasNewFinal && finalTxt && this._listening) {
-      // Apply MRN formatting to final transcript
-      const formattedFinal = this._formatMRN(finalTxt);
+    // Convert to WAV using Web Audio API
+    try {
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const arrayBuffer = await blob.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
 
-      // If in note mode, buffer AND do not treat as a command
-      if (this._noteMode) {
-        this._noteBuffer += (this._noteBuffer ? ' ' : '') + formattedFinal;
-        this.onTranscript(formattedFinal, true);
-        // "create" stops note mode
-        if (/\bcreate\b/.test(finalTxt)) {
-          this._emitStopNote(); // includes final note buffer
-        }
-        return;
-      }
-
-      // Normal command mode
-      const action = this._parseCommand(finalTxt);
-      if (action) {
-        this.onCommand(action, formattedFinal);
-      } else {
-        // Deliver final transcript even if no command matched
-        this.onTranscript(formattedFinal, true);
-      }
+      // Create WAV file
+      const wavBuffer = this._audioBufferToWAV(audioBuffer);
+      return new Blob([wavBuffer], { type: 'audio/wav' });
+    } catch (error) {
+      console.warn('[VOICE] WAV conversion failed, using original blob:', error);
+      return blob;
     }
   }
 
-  _onError(ev) {
-    const code = ev?.error || ev?.message || 'speech_error';
+  _audioBufferToWAV(audioBuffer) {
+    const numberOfChannels = 1; // Mono
+    const sampleRate = audioBuffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
 
-    // Only report non-aborted errors
-    if (code !== 'aborted') {
-      this.onError(String(code));
+    const channelData = audioBuffer.getChannelData(0);
+    const samples = new Int16Array(channelData.length);
+
+    // Convert float samples to 16-bit PCM
+    for (let i = 0; i < channelData.length; i++) {
+      const s = Math.max(-1, Math.min(1, channelData[i]));
+      samples[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
     }
 
-    // Auto-restart on recoverable errors (but not if user stopped intentionally)
-    const recoverable = ['no-speech', 'audio-capture', 'network'];
-    if (this._listening && recoverable.includes(code)) {
-      setTimeout(() => {
-        if (this._listening) {
-          try { this._rec.start(); } catch { }
-        }
-      }, 100);
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+
+    // Write WAV header
+    const writeString = (offset, string) => {
+      for (let i = 0; i < string.length; i++) {
+        view.setUint8(offset + i, string.charCodeAt(i));
+      }
+    };
+
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true); // fmt chunk size
+    view.setUint16(20, format, true);
+    view.setUint16(22, numberOfChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * numberOfChannels * bitDepth / 8, true);
+    view.setUint16(32, numberOfChannels * bitDepth / 8, true);
+    view.setUint16(34, bitDepth, true);
+    writeString(36, 'data');
+    view.setUint32(40, samples.length * 2, true);
+
+    // Write audio data
+    let offset = 44;
+    for (let i = 0; i < samples.length; i++) {
+      view.setInt16(offset, samples[i], true);
+      offset += 2;
+    }
+
+    return buffer;
+  }
+
+  async _transcribeAudio(audioBlob) {
+    try {
+      const formData = new FormData();
+      formData.append('audio', audioBlob, 'recording.wav');
+
+      const response = await fetch('/ehr/ai/speech-to-text', {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) {
+        throw new Error(`Transcription failed: ${response.status}`);
+      }
+
+      const result = await response.json();
+      const transcript = result.transcript || '';
+
+      if (transcript) {
+        this._handleTranscript(transcript, true);
+      }
+
+    } catch (error) {
+      console.error('[VOICE] Transcription error:', error);
+      this.onError(this._errString(error));
     }
   }
 
-  _onEnd() {
-    // Chrome fires onend frequently; auto-restart if we want to keep listening
-    if (this._listening) {
-      // Add small delay to prevent rapid restart cycles
-      setTimeout(() => {
-        if (this._listening && this._rec) {
-          try {
-            this._rec.start();
-          } catch (e) {
-            // If restart fails, update state
-            this._listening = false;
-            this.onListenStateChange(false);
-          }
-        }
-      }, 100);
+  _startContinuousRecording() {
+    // Stop and restart recording every 5 seconds for continuous transcription
+    this._continuousTimer = setInterval(() => {
+      if (!this._listening || !this._mediaRecorder) return;
+
+      if (this._mediaRecorder.state === 'recording') {
+        this._mediaRecorder.stop();
+      }
+    }, 5000);
+  }
+
+  _handleTranscript(text, isFinal) {
+    if (!text) return;
+
+    const formattedText = this._formatMRN(text.toLowerCase());
+
+    // If in note mode, buffer
+    if (this._noteMode) {
+      this._noteBuffer += (this._noteBuffer ? ' ' : '') + formattedText;
+      this.onTranscript(formattedText, true);
+      
+      // "create" stops note mode
+      if (/\bcreate\b/.test(text)) {
+        this._emitStopNote();
+      }
+      return;
+    }
+
+    // Normal command mode
+    const action = this._parseCommand(text);
+    if (action) {
+      this.onCommand(action, formattedText);
     } else {
-      this.onListenStateChange(false);
+      // Deliver final transcript even if no command matched
+      this.onTranscript(formattedText, true);
     }
   }
 

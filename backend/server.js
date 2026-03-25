@@ -26,6 +26,12 @@ const { userInfo } = require('os');
 const { sequelize, connectToDatabase, closeDatabase } = require('./database/database-config');
 const { getAzureSqlConnection } = require('./database/azure-db-helper');
 
+// Azure Speech Services
+const { verifyAzureSpeechConnectivity } = require('./azure-speech-token');
+const { synthesizeSpeech } = require('./azure-speech-tts');
+const { recognizeSpeech } = require('./azure-speech-stt');
+const multer = require('multer');
+
 
 
 console.log('[BOOT] Instance:', process.env.WEBSITE_INSTANCE_ID || process.pid);
@@ -2303,66 +2309,83 @@ function parseJsonObject(raw) {
   }
 }
 
+// ===== AZURE TTS ENDPOINT =====
 app.post('/ehr/ai/text-to-speech', async (req, res) => {
   try {
     const { text } = req.body;
 
     if (!text || typeof text !== 'string' || !text.trim()) {
-      return res.status(400).json({ error: 'Text is required' });
+      return res.status(400).json({
+        success: false,
+        error: 'Text is required'
+      });
     }
 
-    const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-    if (!ELEVENLABS_API_KEY || ELEVENLABS_API_KEY === 'your_elevenlabs_api_key_here') {
-      return res.status(500).json({ error: 'ElevenLabs API key not configured' });
-    }
+    const cleanText = text.trim();
 
-    const VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
+    console.log('[AZURE-TTS] Generating audio for text length:', cleanText.length);
 
-    const MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_monolingual_v1';
+    // Use Azure Speech TTS
+    const audioBuffer = await synthesizeSpeech(cleanText);
+    const audioBase64 = audioBuffer.toString('base64');
 
-    console.log('[TTS] Generating audio for text length:', text.length);
-
-    const elevenResponse = await axios.post(
-      `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`,
-      {
-        text: text.trim(),
-        model_id: MODEL_ID,
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75,
-          style: 0.0,
-          use_speaker_boost: true
-        }
-      },
-      {
-        headers: {
-          'Accept': 'audio/mpeg',
-          'Content-Type': 'application/json',
-          'xi-api-key': ELEVENLABS_API_KEY
-        },
-        responseType: 'arraybuffer',
-        timeout: 180000
-      }
+    console.log(
+      '[AZURE-TTS] Audio generated successfully, size:',
+      audioBuffer.length,
+      'bytes'
     );
 
-    if (elevenResponse.status !== 200) {
-      throw new Error(`ElevenLabs API error: ${elevenResponse.status}`);
+    return res.json({
+      success: true,
+      audio: audioBase64,
+      contentType: 'audio/wav'
+    });
+  } catch (err) {
+    console.error('[AZURE-TTS] Error:', err?.message || err);
+
+    return res.status(500).json({
+      success: false,
+      error: err?.message || 'Failed to generate audio'
+    });
+  }
+});
+
+// ===== AZURE STT ENDPOINT (new) =====
+// Configure multer for in-memory WAV upload
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB limit
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'audio/wav' || file.mimetype === 'audio/wave' || file.mimetype === 'audio/x-wav') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only WAV audio files are allowed'));
+    }
+  }
+});
+
+app.post('/ehr/ai/speech-to-text', upload.single('audio'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No audio file provided' });
     }
 
-    const audioBase64 = Buffer.from(elevenResponse.data).toString('base64');
+    console.log('[AZURE-STT] Processing audio file, size:', req.file.size, 'bytes');
 
-    console.log('[TTS] Audio generated successfully, size:', elevenResponse.data.length, 'bytes');
+    // Use Azure Speech STT
+    const transcript = await recognizeSpeech(req.file.buffer);
+
+    console.log('[AZURE-STT] Transcription successful:', transcript);
 
     res.json({
       success: true,
-      audio: audioBase64,
-      contentType: 'audio/mpeg'
+      transcript: transcript
     });
 
   } catch (err) {
-    console.error('[TTS] Error:', err.message);
+    console.error('[AZURE-STT] Error:', err.message);
     res.status(500).json({
-      error: err?.response?.data?.detail?.message || err.message || 'Failed to generate audio'
+      error: err.message || 'Failed to transcribe audio'
     });
   }
 });
@@ -6723,8 +6746,11 @@ io.on('connection', (socket) => {
 
 
 // -------------------- Start & Shutdown --------------------
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', async () => {
   console.log(`🚀 [SERVER] Running on http://0.0.0.0:${PORT}`);
+  
+  // Verify Azure Speech Services connectivity
+  await verifyAzureSpeechConnectivity();
 });
 
 process.on('uncaughtException', (err) => {
