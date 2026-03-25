@@ -261,11 +261,6 @@ let videoVisible = true;
 let isListening = false;
 let lastRecognizedCommand = '';
 
-// Voice command duplicate guard (safe: affects voice only, not manual buttons)
-let lastVoiceCommandHandled = '';
-let lastVoiceCommandHandledAt = 0;
-const VOICE_CMD_DEDUPE_MS = 1200;
-
 // Audio playback state
 let currentAudio = null;
 let currentAudioUrl = null;
@@ -408,35 +403,6 @@ function toggleAudioPlayback() {
             msg('System', '⚠️ Failed to play audio: ' + err.message);
         });
     }
-}
-
-// Voice-command-safe helpers (explicit actions; manual button logic unchanged)
-function normalizeVoiceCommandText(text) {
-    return String(text || '')
-        .toLowerCase()
-        .replace(/[.,!?;:]/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
-
-function playAudioExplicitly() {
-    if (!currentAudio) return;
-    if (!currentAudio.paused || currentAudio.ended) return;
-
-    currentAudio.play().then(() => {
-        console.log('▶️ [AUDIO][VOICE] Explicit play');
-    }).catch(err => {
-        console.error('[AUDIO][VOICE] Play error:', err);
-        msg('System', '⚠️ Failed to play audio: ' + err.message);
-    });
-}
-
-function pauseAudioExplicitly() {
-    if (!currentAudio) return;
-    if (currentAudio.paused || currentAudio.ended) return;
-
-    currentAudio.pause();
-    console.log('⏸️ [AUDIO][VOICE] Explicit pause');
 }
 
 // ---- XR ID storage (TAB-LOCAL) ----
@@ -1471,33 +1437,18 @@ function setupSR() {
         }
 
         if (finalTxt) {
-            const finalLower = normalizeVoiceCommandText(finalTxt);
-            const now = Date.now();
-
+            const finalLower = finalTxt.toLowerCase();
             lastRecognizedCommand = finalLower;
             elChip.textContent = `Heard: ${finalTxt}`;
             elChip.hidden = false;
             if (orbUI) orbUI.updateResponse(finalTxt, false);
 
             console.log('[VoiceRec] Final transcript:', finalTxt);
-            console.log('[VoiceRec] Normalized:', finalLower);
+            console.log('[VoiceRec] Lowercased:', finalLower);
             console.log('[VoiceRec] Recording active:', recordingActive);
-
-            // Ignore duplicate final command fired back-to-back (common on Android)
-            if (
-                !recordingActive &&
-                finalLower &&
-                finalLower === lastVoiceCommandHandled &&
-                (now - lastVoiceCommandHandledAt) < VOICE_CMD_DEDUPE_MS
-            ) {
-                console.log('[VoiceRec] Ignoring duplicate command:', finalLower);
-                return;
-            }
 
             if (/\bcreate\b/.test(finalLower)) {
                 console.log('[VoiceRec] Matched: Create note');
-                lastVoiceCommandHandled = finalLower;
-                lastVoiceCommandHandledAt = now;
                 onStopRecordingNote();
                 return;
             } else if (recordingActive) {
@@ -1506,8 +1457,6 @@ function setupSR() {
                 conversationBuffer += (conversationBuffer ? ' ' : '') + finalTxt;
             } else {
                 console.log('[VoiceRec] Processing as command');
-                lastVoiceCommandHandled = finalLower;
-                lastVoiceCommandHandledAt = now;
                 processVoiceCommand(finalLower);
             }
         }
@@ -1714,20 +1663,13 @@ function processVoiceCommand(cmd) {
         return;
     }
 
-    const isPauseAudioCmd =
-        /\bpause\b/.test(c) ||
-        /\b(stop|hold)\s+(the\s+)?(audio|music|sound|playback)\b/.test(c) ||
-        /\b(audio|music|sound|playback)\s+(stop|pause)\b/.test(c);
-
-    const isPlayAudioCmd =
-        (
-            /\b(play|resume)\s+(the\s+)?(audio|music|sound|playback)\b/.test(c) ||
-            /\b(audio|music|sound|playback)\s+(play|resume)\b/.test(c)
-        ) && !isPauseAudioCmd;
+    const isPauseAudioCmd = /\bpause\b/.test(c) || /\bstop.*(audio|play|music|sound)\b/.test(c) || /\b(audio|play|music|sound).*stop\b/.test(c);
+    const isPlayAudioCmd = (/\bplay\b/.test(c) || /\bresume\b/.test(c)) && !isPauseAudioCmd;
 
     if (isPauseAudioCmd) {
         if (currentAudio && !currentAudio.paused && !currentAudio.ended) {
-            pauseAudioExplicitly();
+            const _btn = document.getElementById('btnAudio');
+            if (_btn) { _btn.click(); } else { toggleAudioPlayback(); }
             msg('Voice', 'Pausing audio');
             if (orbUI) orbUI.updateResponse('Pausing audio', false);
         } else if (!currentAudio) {
@@ -1740,7 +1682,8 @@ function processVoiceCommand(cmd) {
 
     if (isPlayAudioCmd) {
         if (currentAudio && currentAudio.paused && !currentAudio.ended) {
-            playAudioExplicitly();
+            const _btn = document.getElementById('btnAudio');
+            if (_btn) { _btn.click(); } else { toggleAudioPlayback(); }
             msg('Voice', 'Resuming audio');
             if (orbUI) orbUI.updateResponse('Resuming audio', false);
         } else if (!currentAudio) {
