@@ -262,6 +262,9 @@ let isListening = false;
 let lastRecognizedCommand = '';
 let micActive = false;
 let micActiveSince = 0;
+let lastAudioVoiceCmdTime = 0;
+let lastAudioVoiceCmdType = '';
+
 
 
 // Audio playback state
@@ -1681,10 +1684,17 @@ function processVoiceCommand(cmd) {
         return;
     }
 
-    const isPauseAudioCmd = /\bpause\b/.test(c) || /\bstop.*(audio|play|music|sound)\b/.test(c) || /\b(audio|play|music|sound).*stop\b/.test(c);
-    const isPlayAudioCmd = (/\bplay\b/.test(c) || /\bresume\b/.test(c)) && !isPauseAudioCmd;
+    const isPauseAudioCmd = /\bpause\s+(the\s+)?(audio|music|sound|playback)\b/.test(c) || /\bstop\s+(the\s+)?(audio|music|sound|playback)\b/.test(c);
+    const isPlayAudioCmd = /\b(play|resume)\s+(the\s+)?(audio|music|sound|playback)\b/.test(c);
 
     if (isPauseAudioCmd) {
+        const now = Date.now();
+        if (lastAudioVoiceCmdType === 'pause' && (now - lastAudioVoiceCmdTime) < 2000) {
+            console.log('[VOICE][AUDIO] Duplicate pause command ignored (debounce)');
+            return;
+        }
+        lastAudioVoiceCmdType = 'pause';
+        lastAudioVoiceCmdTime = now;
         console.log('[VOICE][ACTION][PAUSE]', {
             hasAudio: !!currentAudio,
             paused: currentAudio?.paused,
@@ -1705,6 +1715,13 @@ function processVoiceCommand(cmd) {
     }
 
     if (isPlayAudioCmd) {
+        const now = Date.now();
+        if (lastAudioVoiceCmdType === 'play' && (now - lastAudioVoiceCmdTime) < 2000) {
+            console.log('[VOICE][AUDIO] Duplicate play command ignored (debounce)');
+            return;
+        }
+        lastAudioVoiceCmdType = 'play';
+        lastAudioVoiceCmdTime = now;
         const micWarmupMs = 800;
         const pausedByMic = micActive && (Date.now() - micActiveSince) < micWarmupMs;
         if (currentAudio && currentAudio.paused && !currentAudio.ended && !pausedByMic) {
@@ -1726,6 +1743,7 @@ function processVoiceCommand(cmd) {
         }
         return;
     }
+
 
 
     msg('Voice', `Unrecognized command: ${cmd}`);
