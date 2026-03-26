@@ -904,7 +904,7 @@ function createSignaling() {
 
             try {
                 const audioBase64 = payload?.audio;
-                const contentType = payload?.contentType || 'audio/mpeg';
+                const contentType = payload?.contentType || 'audio/wav';
 
                 if (!audioBase64) {
                     console.error('❌ [VISION DEVICE] NOT RECEIVED - No audio data in payload');

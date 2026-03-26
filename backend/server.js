@@ -136,7 +136,7 @@ const io = new Server(server, {
   allowEIO3: true,
   pingInterval: 25000,
   pingTimeout: 30000,
-  maxHttpBufferSize: 10 * 1024 * 1024, // 10MB (increased from default 1MB for large audio payloads)
+  maxHttpBufferSize: 100 * 1024 * 1024, // 100MB — supports large WAV audio
 });
 
 console.log('[SOCKET.IO] Socket.IO server initialized');
@@ -209,8 +209,7 @@ if (IS_PROD && process.env.REDIS_URL) {
 
 // -------------------- Middleware --------------------
 app.use(cors());
-app.use(express.json({ limit: '5mb' }));
-app.use(express.json());
+app.use(express.json({ limit: '100mb' }));
 console.log('[MIDDLEWARE] CORS + JSON enabled');
 
 // -------------------- Redis Client Factory (Stability Hardened) --------------------
@@ -6320,32 +6319,24 @@ io.on('connection', (socket) => {
       } else {
         console.warn('[play_audio_on_device] ⚠️ WARNING: Room is EMPTY! No devices will receive the audio.');
       }
-
-      // Emit to room
-      io.to(targetRoom).emit('play_audio', {
-        audio,
-        contentType: contentType || 'audio/mpeg',
-        timestamp: Date.now()
-      });
-
-      console.log('[play_audio_on_device] ✅ Emitted play_audio event to room');
-
-      // ALSO emit directly to EVERY socket in the room (not just devices)
-      if (roomSockets && roomSockets.size > 0) {
-        for (const socketId of roomSockets) {
-          const sock = io.sockets.sockets.get(socketId);
-          if (sock) {
-            console.log(`[play_audio_on_device] 🎯 DIRECT emit to socket ${socketId} (xrId=${sock.data?.xrId}, clientType=${sock.data?.clientType})`);
-            sock.emit('play_audio', {
-              audio,
-              contentType: contentType || 'audio/mpeg',
-              timestamp: Date.now()
-            });
-          }
+// Emit directly to DEVICE sockets only (skip cockpit/dashboard)
+      let sentCount = 0;
+      for (const [, sock] of io.sockets.sockets) {
+        if (
+          sock.data?.roomId === targetRoom &&
+          sock.data?.clientType !== 'cockpit' &&
+          sock.data?.clientType !== 'dashboard'
+        ) {
+          sock.emit('play_audio', {
+            audio,
+            contentType: contentType || 'audio/wav',  // ✅ WAV correct
+            timestamp: Date.now()
+          });
+          sentCount++;
+          console.log(`[play_audio_on_device] ✅ Sent to device: ${sock.id} (${sock.data?.clientType})`);
         }
       }
-
-      console.log('[play_audio_on_device] ✅ Completed audio broadcast');
+      console.log(`[play_audio_on_device] ✅ Delivered to ${sentCount} device(s)`);
     } catch (e) {
       console.error('[play_audio_on_device] Error:', e?.message || e);
     }
@@ -6359,6 +6350,48 @@ io.on('connection', (socket) => {
         console.warn('[audio_playback_complete] No room for this socket');
         return;
       }
+      // -------- play_audio_chunk (large audio chunked transfer) --------
+  const audioChunkBuffer = new Map();
+
+  socket.on('play_audio_chunk', ({ audioId, chunk, chunkIndex, totalChunks, contentType, room }) => {
+    try {
+      if (!audioChunkBuffer.has(audioId)) {
+        audioChunkBuffer.set(audioId, { chunks: [], totalChunks, contentType, room });
+      }
+      const buf = audioChunkBuffer.get(audioId);
+      buf.chunks[chunkIndex] = chunk;
+      const received = buf.chunks.filter(Boolean).length;
+      console.log(`[play_audio_chunk] audioId=${audioId} chunk ${chunkIndex + 1}/${totalChunks} (${received} received)`);
+
+      if (received === totalChunks) {
+        const fullAudio = buf.chunks.join('');
+        audioChunkBuffer.delete(audioId);
+        console.log(`[play_audio_chunk] ✅ Reassembled, size: ${fullAudio.length} chars`);
+
+        const targetRoom = buf.room || socket.data?.roomId;
+        if (!targetRoom) { console.warn('[play_audio_chunk] No target room'); return; }
+
+        let sentCount = 0;
+        for (const [, sock] of io.sockets.sockets) {
+          if (
+            sock.data?.roomId === targetRoom &&
+            sock.data?.clientType !== 'cockpit' &&
+            sock.data?.clientType !== 'dashboard'
+          ) {
+            sock.emit('play_audio', {
+              audio: fullAudio,
+              contentType: buf.contentType || 'audio/wav',
+              timestamp: Date.now()
+            });
+            sentCount++;
+          }
+        }
+        console.log(`[play_audio_chunk] ✅ Delivered to ${sentCount} device(s)`);
+      }
+    } catch (e) {
+      console.error('[play_audio_chunk] Error:', e?.message || e);
+    }
+  });
 
       console.log('[audio_playback_complete] Device finished playing audio, notifying room:', roomId, data);
 
