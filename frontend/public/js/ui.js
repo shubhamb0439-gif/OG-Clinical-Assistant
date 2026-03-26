@@ -1669,7 +1669,8 @@ function processVoiceCommand(cmd) {
 
     if (isPauseAudioCmd) {
         if (currentAudio && !currentAudio.paused && !currentAudio.ended) {
-            currentAudio.pause();
+            const _btn = document.getElementById('btnAudio');
+            if (_btn) { _btn.click(); } else { toggleAudioPlayback(); }
             msg('Voice', 'Pausing audio');
             if (orbUI) orbUI.updateResponse('Pausing audio', false);
         } else if (!currentAudio) {
@@ -1682,13 +1683,10 @@ function processVoiceCommand(cmd) {
 
     if (isPlayAudioCmd) {
         if (currentAudio && currentAudio.paused && !currentAudio.ended) {
-            currentAudio.play().then(() => {
-                msg('Voice', 'Resuming audio');
-                if (orbUI) orbUI.updateResponse('Resuming audio', false);
-            }).catch(err => {
-                console.error('[AUDIO] Voice play error:', err);
-                msg('System', '⚠️ Failed to play audio: ' + err.message);
-            });
+            const _btn = document.getElementById('btnAudio');
+            if (_btn) { _btn.click(); } else { toggleAudioPlayback(); }
+            msg('Voice', 'Resuming audio');
+            if (orbUI) orbUI.updateResponse('Resuming audio', false);
         } else if (!currentAudio) {
             msg('Voice', 'No audio to play');
         } else if (currentAudio.ended) {
@@ -1698,7 +1696,6 @@ function processVoiceCommand(cmd) {
         }
         return;
     }
-
 
     msg('Voice', `Unrecognized command: ${cmd}`);
 }

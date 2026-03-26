@@ -58,11 +58,6 @@ export class VoiceController {
     this._listening = false;
     this._lastPartialAt = 0;
     this._lastResultIndex = 0;
-    this._lastCommandAt = 0;
-    this._lastCommandAction = '';
-    this._commandDebounceMs = 1500;
-
-
     this._noteMode = false;
     this._noteBuffer = '';
 
@@ -105,8 +100,6 @@ export class VoiceController {
     if (!this._rec) return;
     // Set listening to false BEFORE stopping to prevent auto-restart
     this._listening = false;
-    this._lastCommandAction = '';
-    this._lastCommandAt = 0;
     try { this._rec.stop(); } catch { }
     this.onListenStateChange(false);
     // If we were in note mode, finalize
@@ -193,19 +186,11 @@ export class VoiceController {
       // Normal command mode
       const action = this._parseCommand(finalTxt);
       if (action) {
-        const now = Date.now();
-        const isDuplicate = action === this._lastCommandAction
-          && (now - this._lastCommandAt) < this._commandDebounceMs;
-        if (!isDuplicate) {
-          this._lastCommandAction = action;
-          this._lastCommandAt = now;
-          this.onCommand(action, formattedFinal);
-        }
+        this.onCommand(action, formattedFinal);
       } else {
         // Deliver final transcript even if no command matched
         this.onTranscript(formattedFinal, true);
       }
-
     }
   }
 
