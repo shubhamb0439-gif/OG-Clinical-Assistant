@@ -381,6 +381,11 @@ function notifyCockpitPlaybackComplete() {
 }
 
 function toggleAudioPlayback() {
+    console.log('[AUDIO][TOGGLE][ENTER]', {
+        hasAudio: !!currentAudio,
+        paused: currentAudio?.paused,
+        ended: currentAudio?.ended
+    });
     if (!currentAudio) {
         console.warn('[AUDIO] No audio loaded');
         return;
@@ -391,11 +396,13 @@ function toggleAudioPlayback() {
     if (!currentAudio.paused) {
         // Audio is currently playing, so pause it
         currentAudio.pause();
+        console.log('[AUDIO][TOGGLE] pause() called');
         // Button will be updated by onpause event handler
         console.log('⏸️ [AUDIO] Pausing...');
     } else {
         // Audio is paused, so play it
         currentAudio.play().then(() => {
+            console.log('[AUDIO][TOGGLE] play() called');
             // Button will be updated by onplay event handler
             console.log('▶️ [AUDIO] Resuming...');
         }).catch(err => {
@@ -942,6 +949,7 @@ function createSignaling() {
 
                 // Set up event handlers BEFORE playing to avoid race conditions
                 currentAudio.onended = () => {
+                    console.log('[AUDIO][EVENT] onended');
                     console.log('✅ [VISION DEVICE] Playback finished');
                     resetAudioState();
                     setAudioBtnState(document.getElementById('btnAudio'), 'idle');
@@ -951,6 +959,7 @@ function createSignaling() {
                 let hasStartedPlaying = false;
 
                 currentAudio.onplay = () => {
+                    console.log('[AUDIO][EVENT] onplay');
                     console.log('▶️ [VISION DEVICE] Audio playing');
                     hasStartedPlaying = true;
                     isAudioPlaying = true;
@@ -976,6 +985,7 @@ function createSignaling() {
                 };
 
                 currentAudio.onpause = () => {
+                    console.log('[AUDIO][EVENT] onpause');
                     if (hasStartedPlaying && !currentAudio.ended) {
                         console.log('⏸️ [VISION DEVICE] Audio paused by user');
                         isAudioPaused = true;
@@ -1409,6 +1419,7 @@ elBtnVideo.addEventListener('click', () => {
 });
 
 
+
 // ----------------- Voice + Notes (partial/final transcripts) -----------------
 let SR = null, rec = null, speechIntentLang = 'en-US';
 let conversationBuffer = '';
@@ -1507,7 +1518,6 @@ function setupSR() {
     };
     return true;
 }
-
 function startVoiceRecognition() {
     if (!setupSR()) {
         msg('System', 'Voice API not available in this browser');
@@ -1564,6 +1574,7 @@ function stopVoiceRecognition() {
 }
 
 function processVoiceCommand(cmd) {
+    console.log('[VOICE][CMD]', cmd);
     const c = cmd.toLowerCase().trim();
     console.log('[Voice] Processing command:', cmd);
     console.log('[Voice] Current state:', {
@@ -1668,8 +1679,14 @@ function processVoiceCommand(cmd) {
     const isPlayAudioCmd = (/\bplay\b/.test(c) || /\bresume\b/.test(c)) && !isPauseAudioCmd;
 
     if (isPauseAudioCmd) {
+        console.log('[VOICE][ACTION][PAUSE]', {
+            hasAudio: !!currentAudio,
+            paused: currentAudio?.paused,
+            ended: currentAudio?.ended
+        });
         if (currentAudio && !currentAudio.paused && !currentAudio.ended) {
             const _btn = document.getElementById('btnAudio');
+            console.log('[AUDIO][TOGGLE_TRIGGERED]', { source: 'voice-pause', hasBtn: !!_btn });
             if (_btn) { _btn.click(); } else { toggleAudioPlayback(); }
             msg('Voice', 'Pausing audio');
             if (orbUI) orbUI.updateResponse('Pausing audio', false);
@@ -1682,8 +1699,14 @@ function processVoiceCommand(cmd) {
     }
 
     if (isPlayAudioCmd) {
+        console.log('[VOICE][ACTION][PLAY]', {
+            hasAudio: !!currentAudio,
+            paused: currentAudio?.paused,
+            ended: currentAudio?.ended
+        });
         if (currentAudio && currentAudio.paused && !currentAudio.ended) {
             const _btn = document.getElementById('btnAudio');
+            console.log('[AUDIO][TOGGLE_TRIGGERED]', { source: 'voice-play', hasBtn: !!_btn });
             if (_btn) { _btn.click(); } else { toggleAudioPlayback(); }
             msg('Voice', 'Resuming audio');
             if (orbUI) orbUI.updateResponse('Resuming audio', false);
