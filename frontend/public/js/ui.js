@@ -260,6 +260,9 @@ let micMuted = true;
 let videoVisible = true;
 let isListening = false;
 let lastRecognizedCommand = '';
+let micActive = false;
+let micActiveSince = 0;
+
 
 // Audio playback state
 let currentAudio = null;
@@ -1530,6 +1533,8 @@ function startVoiceRecognition() {
     }
 
     isListening = true;
+    micActive = true;
+    micActiveSince = Date.now();
     try {
         rec.start();
         msg('System', 'Voice recognition started');
@@ -1556,6 +1561,7 @@ function stopVoiceRecognition() {
         return;
     }
     isListening = false;
+    micActive = false;
     try {
         if (rec) {
             rec.stop();
@@ -1699,26 +1705,28 @@ function processVoiceCommand(cmd) {
     }
 
     if (isPlayAudioCmd) {
-        console.log('[VOICE][ACTION][PLAY]', {
-            hasAudio: !!currentAudio,
-            paused: currentAudio?.paused,
-            ended: currentAudio?.ended
-        });
-        if (currentAudio && currentAudio.paused && !currentAudio.ended) {
-            const _btn = document.getElementById('btnAudio');
-            console.log('[AUDIO][TOGGLE_TRIGGERED]', { source: 'voice-play', hasBtn: !!_btn });
-            if (_btn) { _btn.click(); } else { toggleAudioPlayback(); }
-            msg('Voice', 'Resuming audio');
-            if (orbUI) orbUI.updateResponse('Resuming audio', false);
+        const micWarmupMs = 800;
+        const pausedByMic = micActive && (Date.now() - micActiveSince) < micWarmupMs;
+        if (currentAudio && currentAudio.paused && !currentAudio.ended && !pausedByMic) {
+            currentAudio.play().then(() => {
+                msg('Voice', 'Resuming audio');
+                if (orbUI) orbUI.updateResponse('Resuming audio', false);
+            }).catch(err => {
+                console.error('[AUDIO] Voice play error:', err);
+                msg('System', '⚠️ Failed to play audio: ' + err.message);
+            });
         } else if (!currentAudio) {
             msg('Voice', 'No audio to play');
         } else if (currentAudio.ended) {
             msg('Voice', 'Audio has finished');
+        } else if (pausedByMic) {
+            msg('Voice', 'Audio paused by mic — ignoring play command');
         } else {
             msg('Voice', 'Audio already playing');
         }
         return;
     }
+
 
     msg('Voice', `Unrecognized command: ${cmd}`);
 }
