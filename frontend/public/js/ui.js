@@ -1681,77 +1681,66 @@ function processVoiceCommand(cmd) {
         }
         return;
     }
-    // ----- STRICT AUDIO VOICE COMMANDS (Android-safe) -----
-    const normalizedVoiceCmd = c.replace(/\s+/g, ' ').trim();
+    const isPauseAudioCmd = /\bpause\s+(the\s+)?(audio|music|sound|playback)\b/.test(c) || /\bstop\s+(the\s+)?(audio|music|sound|playback)\b/.test(c);
+    const isPlayAudioCmd = /\b(play|resume)\s+(the\s+)?(audio|music|sound|playback)\b/.test(c);
 
-    const isExactPlayAudioCmd =
-        normalizedVoiceCmd === 'play audio';
-
-    const isExactPauseAudioCmd =
-        normalizedVoiceCmd === 'pause audio';
-
-    if (isExactPauseAudioCmd) {
+    if (isPauseAudioCmd) {
         const now = Date.now();
-
-        // ignore duplicate repeated Android final results
         if (lastAudioVoiceCmdType === 'pause' && (now - lastAudioVoiceCmdTime) < 2000) {
-            console.log('[VOICE][AUDIO] Duplicate pause command ignored');
+            console.log('[VOICE][AUDIO] Duplicate pause command ignored (debounce)');
             return;
         }
-
         lastAudioVoiceCmdType = 'pause';
         lastAudioVoiceCmdTime = now;
-
-        if (!currentAudio) {
-            msg('Voice', 'No audio to pause');
-            return;
-        }
-
-        if (!currentAudio.paused && !currentAudio.ended) {
-            currentAudio.pause();   // ✅ explicit action, no toggle
+        console.log('[VOICE][ACTION][PAUSE]', {
+            hasAudio: !!currentAudio,
+            paused: currentAudio?.paused,
+            ended: currentAudio?.ended
+        });
+        if (currentAudio && !currentAudio.paused && !currentAudio.ended) {
+            const _btn = document.getElementById('btnAudio');
+            console.log('[AUDIO][TOGGLE_TRIGGERED]', { source: 'voice-pause', hasBtn: !!_btn });
+            if (_btn) { _btn.click(); } else { toggleAudioPlayback(); }
             msg('Voice', 'Pausing audio');
             if (orbUI) orbUI.updateResponse('Pausing audio', false);
+        } else if (!currentAudio) {
+            msg('Voice', 'No audio to pause');
         } else {
             msg('Voice', 'Audio already paused');
         }
         return;
     }
 
-    if (isExactPlayAudioCmd) {
+    if (isPlayAudioCmd) {
         const now = Date.now();
-
-        // ignore duplicate repeated Android final results
         if (lastAudioVoiceCmdType === 'play' && (now - lastAudioVoiceCmdTime) < 2000) {
-            console.log('[VOICE][AUDIO] Duplicate play command ignored');
+            console.log('[VOICE][AUDIO] Duplicate play command ignored (debounce)');
             return;
         }
-
         lastAudioVoiceCmdType = 'play';
         lastAudioVoiceCmdTime = now;
-
-        if (!currentAudio) {
-            msg('Voice', 'No audio to play');
-            return;
-        }
-
-        if (currentAudio.ended) {
-            msg('Voice', 'Audio has finished');
-            return;
-        }
-
-        if (currentAudio.paused) {
+        const micWarmupMs = 800;
+        const pausedByMic = micActive && (Date.now() - micActiveSince) < micWarmupMs;
+        if (currentAudio && currentAudio.paused && !currentAudio.ended && !pausedByMic) {
             currentAudio.play().then(() => {
-                msg('Voice', 'Playing audio');
-                if (orbUI) orbUI.updateResponse('Playing audio', false);
+                msg('Voice', 'Resuming audio');
+                if (orbUI) orbUI.updateResponse('Resuming audio', false);
             }).catch(err => {
                 console.error('[AUDIO] Voice play error:', err);
                 msg('System', '⚠️ Failed to play audio: ' + err.message);
             });
+        } else if (!currentAudio) {
+            msg('Voice', 'No audio to play');
+        } else if (currentAudio.ended) {
+            msg('Voice', 'Audio has finished');
+        } else if (pausedByMic) {
+            msg('Voice', 'Audio paused by mic — ignoring play command');
         } else {
             msg('Voice', 'Audio already playing');
         }
         return;
     }
+
 
 
     msg('Voice', `Unrecognized command: ${cmd}`);
