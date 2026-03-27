@@ -17,7 +17,6 @@ const { Server } = require('socket.io');
 const { createClient } = require('redis');
 const { createAdapter } = require('@socket.io/redis-adapter');
 const axios = require('axios'); // for SOAP note generation
-const { synthesizeSpeech } = require('./azure-speech-tts');
 const sql = require('mssql');   // MSSQL driver
 const { Sequelize } = require('sequelize');
 const bcrypt = require('bcryptjs');
@@ -2303,6 +2302,13 @@ function parseJsonObject(raw) {
   }
 }
 
+// ── Azure TTS ──────────────────────────────────────────────────────────────────
+// ElevenLabs has been fully removed. Azure Cognitive Services TTS is used instead.
+// Auth: SP (local) → User-Assigned MI (production) via azure-speech-token.js
+// Voice: en-IN-NeerjaNeural | Output: WAV Riff24Khz16BitMonoPcm
+// ───────────────────────────────────────────────────────────────────────────────
+const { synthesizeSpeech } = require('./azure-speech-tts');
+
 app.post('/ehr/ai/text-to-speech', async (req, res) => {
   try {
     const { text } = req.body;
@@ -2311,11 +2317,18 @@ app.post('/ehr/ai/text-to-speech', async (req, res) => {
       return res.status(400).json({ error: 'Text is required' });
     }
 
-    console.log('[TTS] Generating Azure speech for text length:', text.length);
-    const audioBuffer = await synthesizeSpeech(text);
+    console.log('[TTS] 🔄 TTS trigger received — text length:', text.trim().length, 'chars');
+    console.log('[TTS] 🔄 Forwarding to Azure TTS pipeline...');
+
+    // ── Azure TTS request ──────────────────────────────────────────────────────
+    const audioBuffer = await synthesizeSpeech(text.trim());
+    // ──────────────────────────────────────────────────────────────────────────
+
+    console.log('[TTS] ✅ Azure TTS response received — audio size:', audioBuffer.length, 'bytes');
+
     const audioBase64 = audioBuffer.toString('base64');
 
-    console.log('[TTS] Audio generated successfully, size:', audioBuffer.length, 'bytes');
+    console.log('[TTS] ✅ Audio encoded to base64, transferring to pipeline...');
 
     res.json({
       success: true,
@@ -2323,9 +2336,13 @@ app.post('/ehr/ai/text-to-speech', async (req, res) => {
       contentType: 'audio/wav'
     });
 
+    console.log('[TTS] ✅ Pipeline transfer complete — audio dispatched to device flow');
+
   } catch (err) {
-    console.error('[TTS] Error:', err.message);
-    res.status(500).json({ error: err.message || 'Failed to generate audio' });
+    console.error('[TTS] ❌ Error during Azure TTS synthesis:', err.message);
+    res.status(500).json({
+      error: err?.message || 'Failed to generate audio via Azure TTS'
+    });
   }
 });
 
@@ -6242,13 +6259,64 @@ io.on('connection', (socket) => {
 
       console.log('[play_audio_on_device] Broadcasting to room:', targetRoom, 'audio size:', audio.length, 'chars');
 
-      // ✅ Use io.to(room).emit — works across ALL instances via Redis adapter
-      io.to(targetRoom).emit('play_audio', {
-        audio,
-        contentType: contentType || 'audio/wav',
-        timestamp: Date.now()
-      });
-      console.log('[play_audio_on_device] ✅ Emitted play_audio to room:', targetRoom);
+      // Get room members for debugging
+      const roomSockets = io.sockets.adapter.rooms.get(targetRoom);
+      const memberCount = roomSockets ? roomSockets.size : 0;
+      console.log('[play_audio_on_device] Room members:', memberCount);
+
+      // Log each member's details
+      if (roomSockets && roomSockets.size > 0) {
+        console.log('[play_audio_on_device] Room member details:');
+        let deviceCount = 0;
+        let cockpitCount = 0;
+
+        for (const socketId of roomSockets) {
+          const sock = io.sockets.sockets.get(socketId);
+          if (sock) {
+            const cType = sock.data?.clientType || 'unknown';
+            if (cType === 'device') deviceCount++;
+            if (cType === 'cockpit') cockpitCount++;
+
+            console.log(`  - Socket ${socketId}:`, {
+              xrId: sock.data?.xrId,
+              deviceName: sock.data?.deviceName,
+              roomId: sock.data?.roomId,
+              clientType: cType,
+              playAudioListeners: sock.listeners('play_audio').length
+            });
+          }
+        }
+
+        console.log('[play_audio_on_device] Summary:', {
+          totalMembers: roomSockets.size,
+          devices: deviceCount,
+          cockpits: cockpitCount
+        });
+
+        if (deviceCount === 0) {
+          console.warn('[play_audio_on_device] ⚠️ WARNING: No DEVICE sockets in room! Only cockpits present.');
+        }
+      } else {
+        console.warn('[play_audio_on_device] ⚠️ WARNING: Room is EMPTY! No devices will receive the audio.');
+      }
+// Emit directly to DEVICE sockets only (skip cockpit/dashboard)
+      let sentCount = 0;
+      for (const [, sock] of io.sockets.sockets) {
+        if (
+          sock.data?.roomId === targetRoom &&
+          sock.data?.clientType !== 'cockpit' &&
+          sock.data?.clientType !== 'dashboard'
+        ) {
+          sock.emit('play_audio', {
+            audio,
+            contentType: contentType || 'audio/wav',  // ✅ WAV correct
+            timestamp: Date.now()
+          });
+          sentCount++;
+          console.log(`[play_audio_on_device] ✅ Sent to device: ${sock.id} (${sock.data?.clientType})`);
+        }
+      }
+      console.log(`[play_audio_on_device] ✅ Delivered to ${sentCount} device(s)`);
     } catch (e) {
       console.error('[play_audio_on_device] Error:', e?.message || e);
     }
@@ -6283,13 +6351,22 @@ io.on('connection', (socket) => {
         const targetRoom = buf.room || socket.data?.roomId;
         if (!targetRoom) { console.warn('[play_audio_chunk] No target room'); return; }
 
-        // ✅ Use io.to(room).emit — works across ALL instances via Redis adapter
-        io.to(targetRoom).emit('play_audio', {
-          audio: fullAudio,
-          contentType: buf.contentType || 'audio/wav',
-          timestamp: Date.now()
-        });
-        console.log('[play_audio_chunk] ✅ Emitted play_audio to room:', targetRoom);
+        let sentCount = 0;
+        for (const [, sock] of io.sockets.sockets) {
+          if (
+            sock.data?.roomId === targetRoom &&
+            sock.data?.clientType !== 'cockpit' &&
+            sock.data?.clientType !== 'dashboard'
+          ) {
+            sock.emit('play_audio', {
+              audio: fullAudio,
+              contentType: buf.contentType || 'audio/wav',
+              timestamp: Date.now()
+            });
+            sentCount++;
+          }
+        }
+        console.log(`[play_audio_chunk] ✅ Delivered to ${sentCount} device(s)`);
       }
     } catch (e) {
       console.error('[play_audio_chunk] Error:', e?.message || e);
