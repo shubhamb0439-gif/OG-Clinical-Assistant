@@ -25,17 +25,29 @@ async function getAzureSpeechToken() {
 
   let credential = null;
 
-  // Try Service Principal first
-  const clientId = process.env.DB_CLIENT_ID;
+  // Auth env vars
+  const clientId     = process.env.DB_CLIENT_ID;
   const clientSecret = process.env.DB_CLIENT_SECRET;
-  const tenantId = process.env.DB_TENANT_ID;
+  const tenantId     = process.env.DB_TENANT_ID;
+  const miClientId   = process.env.AZURE_CLIENT_ID_MI; // User-Assigned Managed Identity
 
   if (clientId && clientSecret && tenantId) {
-    console.log('[AZURE-SPEECH-TOKEN] Using Service Principal authentication');
+    // LOCAL: Service Principal authentication
+    console.log('[AZURE-SPEECH-TOKEN] 🔑 Auth Mode  : Service Principal');
+    console.log('[AZURE-SPEECH-TOKEN]   DB_CLIENT_ID     ✅ set');
+    console.log('[AZURE-SPEECH-TOKEN]   DB_CLIENT_SECRET ✅ set');
+    console.log('[AZURE-SPEECH-TOKEN]   DB_TENANT_ID     ✅ set');
     credential = new ClientSecretCredential(tenantId, clientId, clientSecret);
+
+  } else if (miClientId) {
+    // PRODUCTION: User-Assigned Managed Identity
+    console.log('[AZURE-SPEECH-TOKEN] 🔑 Auth Mode  : User-Assigned Managed Identity');
+    console.log('[AZURE-SPEECH-TOKEN]   AZURE_CLIENT_ID_MI ✅ set');
+    credential = new ManagedIdentityCredential({ clientId: miClientId });
+
   } else {
-    // Fallback to Managed Identity
-    console.log('[AZURE-SPEECH-TOKEN] Using Managed Identity authentication');
+    // Last resort: System-Assigned MI (will likely fail if you have user-assigned MI)
+    console.warn('[AZURE-SPEECH-TOKEN] ⚠️  Auth Mode  : System-Assigned MI (AZURE_CLIENT_ID_MI not set — may fail!)');
     credential = new ManagedIdentityCredential();
   }
 
