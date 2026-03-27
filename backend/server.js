@@ -17,6 +17,7 @@ const { Server } = require('socket.io');
 const { createClient } = require('redis');
 const { createAdapter } = require('@socket.io/redis-adapter');
 const axios = require('axios'); // for SOAP note generation
+const { synthesizeSpeech } = require('./azure-speech-tts');
 const sql = require('mssql');   // MSSQL driver
 const { Sequelize } = require('sequelize');
 const bcrypt = require('bcryptjs');
@@ -2310,59 +2311,21 @@ app.post('/ehr/ai/text-to-speech', async (req, res) => {
       return res.status(400).json({ error: 'Text is required' });
     }
 
-    const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-    if (!ELEVENLABS_API_KEY || ELEVENLABS_API_KEY === 'your_elevenlabs_api_key_here') {
-      return res.status(500).json({ error: 'ElevenLabs API key not configured' });
-    }
+    console.log('[TTS] Generating Azure speech for text length:', text.length);
+    const audioBuffer = await synthesizeSpeech(text);
+    const audioBase64 = audioBuffer.toString('base64');
 
-    const VOICE_ID = process.env.ELEVENLABS_VOICE_ID || '21m00Tcm4TlvDq8ikWAM';
-
-    const MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_monolingual_v1';
-
-    console.log('[TTS] Generating audio for text length:', text.length);
-
-    const elevenResponse = await axios.post(
-      `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}`,
-      {
-        text: text.trim(),
-        model_id: MODEL_ID,
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75,
-          style: 0.0,
-          use_speaker_boost: true
-        }
-      },
-      {
-        headers: {
-          'Accept': 'audio/mpeg',
-          'Content-Type': 'application/json',
-          'xi-api-key': ELEVENLABS_API_KEY
-        },
-        responseType: 'arraybuffer',
-        timeout: 180000
-      }
-    );
-
-    if (elevenResponse.status !== 200) {
-      throw new Error(`ElevenLabs API error: ${elevenResponse.status}`);
-    }
-
-    const audioBase64 = Buffer.from(elevenResponse.data).toString('base64');
-
-    console.log('[TTS] Audio generated successfully, size:', elevenResponse.data.length, 'bytes');
+    console.log('[TTS] Audio generated successfully, size:', audioBuffer.length, 'bytes');
 
     res.json({
       success: true,
       audio: audioBase64,
-      contentType: 'audio/mpeg'
+      contentType: 'audio/wav'
     });
 
   } catch (err) {
     console.error('[TTS] Error:', err.message);
-    res.status(500).json({
-      error: err?.response?.data?.detail?.message || err.message || 'Failed to generate audio'
-    });
+    res.status(500).json({ error: err.message || 'Failed to generate audio' });
   }
 });
 
@@ -6279,64 +6242,13 @@ io.on('connection', (socket) => {
 
       console.log('[play_audio_on_device] Broadcasting to room:', targetRoom, 'audio size:', audio.length, 'chars');
 
-      // Get room members for debugging
-      const roomSockets = io.sockets.adapter.rooms.get(targetRoom);
-      const memberCount = roomSockets ? roomSockets.size : 0;
-      console.log('[play_audio_on_device] Room members:', memberCount);
-
-      // Log each member's details
-      if (roomSockets && roomSockets.size > 0) {
-        console.log('[play_audio_on_device] Room member details:');
-        let deviceCount = 0;
-        let cockpitCount = 0;
-
-        for (const socketId of roomSockets) {
-          const sock = io.sockets.sockets.get(socketId);
-          if (sock) {
-            const cType = sock.data?.clientType || 'unknown';
-            if (cType === 'device') deviceCount++;
-            if (cType === 'cockpit') cockpitCount++;
-
-            console.log(`  - Socket ${socketId}:`, {
-              xrId: sock.data?.xrId,
-              deviceName: sock.data?.deviceName,
-              roomId: sock.data?.roomId,
-              clientType: cType,
-              playAudioListeners: sock.listeners('play_audio').length
-            });
-          }
-        }
-
-        console.log('[play_audio_on_device] Summary:', {
-          totalMembers: roomSockets.size,
-          devices: deviceCount,
-          cockpits: cockpitCount
-        });
-
-        if (deviceCount === 0) {
-          console.warn('[play_audio_on_device] ⚠️ WARNING: No DEVICE sockets in room! Only cockpits present.');
-        }
-      } else {
-        console.warn('[play_audio_on_device] ⚠️ WARNING: Room is EMPTY! No devices will receive the audio.');
-      }
-// Emit directly to DEVICE sockets only (skip cockpit/dashboard)
-      let sentCount = 0;
-      for (const [, sock] of io.sockets.sockets) {
-        if (
-          sock.data?.roomId === targetRoom &&
-          sock.data?.clientType !== 'cockpit' &&
-          sock.data?.clientType !== 'dashboard'
-        ) {
-          sock.emit('play_audio', {
-            audio,
-            contentType: contentType || 'audio/wav',  // ✅ WAV correct
-            timestamp: Date.now()
-          });
-          sentCount++;
-          console.log(`[play_audio_on_device] ✅ Sent to device: ${sock.id} (${sock.data?.clientType})`);
-        }
-      }
-      console.log(`[play_audio_on_device] ✅ Delivered to ${sentCount} device(s)`);
+      // ✅ Use io.to(room).emit — works across ALL instances via Redis adapter
+      io.to(targetRoom).emit('play_audio', {
+        audio,
+        contentType: contentType || 'audio/wav',
+        timestamp: Date.now()
+      });
+      console.log('[play_audio_on_device] ✅ Emitted play_audio to room:', targetRoom);
     } catch (e) {
       console.error('[play_audio_on_device] Error:', e?.message || e);
     }
@@ -6371,22 +6283,13 @@ io.on('connection', (socket) => {
         const targetRoom = buf.room || socket.data?.roomId;
         if (!targetRoom) { console.warn('[play_audio_chunk] No target room'); return; }
 
-        let sentCount = 0;
-        for (const [, sock] of io.sockets.sockets) {
-          if (
-            sock.data?.roomId === targetRoom &&
-            sock.data?.clientType !== 'cockpit' &&
-            sock.data?.clientType !== 'dashboard'
-          ) {
-            sock.emit('play_audio', {
-              audio: fullAudio,
-              contentType: buf.contentType || 'audio/wav',
-              timestamp: Date.now()
-            });
-            sentCount++;
-          }
-        }
-        console.log(`[play_audio_chunk] ✅ Delivered to ${sentCount} device(s)`);
+        // ✅ Use io.to(room).emit — works across ALL instances via Redis adapter
+        io.to(targetRoom).emit('play_audio', {
+          audio: fullAudio,
+          contentType: buf.contentType || 'audio/wav',
+          timestamp: Date.now()
+        });
+        console.log('[play_audio_chunk] ✅ Emitted play_audio to room:', targetRoom);
       }
     } catch (e) {
       console.error('[play_audio_chunk] Error:', e?.message || e);
