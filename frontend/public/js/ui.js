@@ -892,7 +892,7 @@ function createSignaling() {
             if (cmd === 'unmute') { applyMute(false); return; }
         },
 
-        onPlayAudio: (payload) => {
+        onPlayAudio: async (payload) => {
             console.log('🔊🔊🔊 [VISION DEVICE] ★★★ AUDIO RECEIVED ★★★ 🔊🔊🔊', {
                 hasPayload: !!payload,
                 hasAudio: !!payload?.audio,
@@ -914,118 +914,102 @@ function createSignaling() {
 
                 console.log('✅ [VISION DEVICE] RECEIVED - Decoding base64 audio, length:', audioBase64.length);
 
-                // Clean up previous audio
-                if (currentAudio) {
-                    currentAudio.pause();
-                    currentAudio = null;
-                }
-                if (currentAudioUrl) {
-                    URL.revokeObjectURL(currentAudioUrl);
-                    currentAudioUrl = null;
-                }
-                if (audioTimeoutId) {
-                    clearTimeout(audioTimeoutId);
-                    audioTimeoutId = null;
-                }
+                // Stop and clean up any previous audio (single engine: AudioContext only)
+                resetAudioState();
 
                 const audioData = atob(audioBase64);
                 const arrayBuffer = new ArrayBuffer(audioData.length);
                 const uint8Array = new Uint8Array(arrayBuffer);
-
                 for (let i = 0; i < audioData.length; i++) {
                     uint8Array[i] = audioData.charCodeAt(i);
                 }
 
-                const blob = new Blob([uint8Array], { type: contentType });
-                currentAudioUrl = URL.createObjectURL(blob);
-
-                console.log('✅ [VISION DEVICE] Created blob URL:', currentAudioUrl, 'size:', blob.size);
-
-                currentAudio = new Audio(currentAudioUrl);
-
-                // Update button to Pause state (audio will autoplay)
-                const btnAudio = document.getElementById('btnAudio');
-                console.log('🔘 [VISION DEVICE] Button before update:', btnAudio ? 'found' : 'NULL');
-                if (btnAudio) {
-                    setAudioBtnState(btnAudio, 'playing');
-                    console.log('✅ [VISION DEVICE] Audio button updated to Pause state');
-                } else {
-                    console.error('❌ [VISION DEVICE] btnAudio element not found!');
+                // Reuse a single shared AudioContext for the whole session
+                if (!window._xrAudioCtx || window._xrAudioCtx.state === 'closed') {
+                    window._xrAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                const audioCtx = window._xrAudioCtx;
+                if (audioCtx.state === 'suspended') {
+                    await audioCtx.resume();
                 }
 
-                // Set up event handlers BEFORE playing to avoid race conditions
-                currentAudio.onended = () => {
-                    console.log('[AUDIO][EVENT] onended');
-                    console.log('✅ [VISION DEVICE] Playback finished');
-                    resetAudioState();
-                    setAudioBtnState(document.getElementById('btnAudio'), 'idle');
-                    notifyCockpitPlaybackComplete();
-                };
+                const decodedBuffer = await audioCtx.decodeAudioData(arrayBuffer);
 
-                let hasStartedPlaying = false;
+                // Store source + startTime on window so toggleAudioPlayback can pause/resume
+                window._xrAudioSource = null;
+                window._xrAudioBuffer = decodedBuffer;
+                window._xrAudioOffset = 0;       // how many seconds played so far
+                window._xrAudioStartedAt = 0;    // audioCtx.currentTime when last started
+                window._xrAudioPaused = false;
 
-                currentAudio.onplay = () => {
-                    console.log('[AUDIO][EVENT] onplay');
-                    console.log('▶️ [VISION DEVICE] Audio playing');
-                    hasStartedPlaying = true;
+                const btnAudio = document.getElementById('btnAudio');
+
+                function _startSource(offset) {
+                    const src = audioCtx.createBufferSource();
+                    src.buffer = window._xrAudioBuffer;
+                    src.connect(audioCtx.destination);
+                    src.onended = () => {
+                        // Only treat as "finished" if not paused (pause also fires onended)
+                        if (!window._xrAudioPaused) {
+                            console.log('✅ [VISION DEVICE] AudioContext playback finished');
+                            window._xrAudioSource = null;
+                            resetAudioState();
+                            setAudioBtnState(document.getElementById('btnAudio'), 'idle');
+                            notifyCockpitPlaybackComplete();
+                        }
+                    };
+                    src.start(0, offset);
+                    window._xrAudioSource = src;
+                    window._xrAudioStartedAt = audioCtx.currentTime;
+                    window._xrAudioPaused = false;
                     isAudioPlaying = true;
                     isAudioPaused = false;
-                    if (audioTimeoutId) {
-                        clearTimeout(audioTimeoutId);
-                        audioTimeoutId = null;
-                    }
-                    setAudioBtnState(document.getElementById('btnAudio'), 'playing');
-                    console.log('✅ [VISION DEVICE] onplay: Button set to Pause');
+                    setAudioBtnState(btnAudio, 'playing');
                     try {
                         if (signaling?.socket?.connected) {
-                            signaling.socket.emit('audio_state_changed', {
-                                deviceId: ANDROID_XR_ID,
-                                state: 'playing',
-                                timestamp: Date.now()
-                            });
-                            console.log('✅ [AUDIO] Notified cockpit: audio playing');
+                            signaling.socket.emit('audio_state_changed', { deviceId: ANDROID_XR_ID, state: 'playing', timestamp: Date.now() });
                         }
-                    } catch (err) {
-                        console.warn('[AUDIO] Failed to notify cockpit:', err);
-                    }
-                };
+                    } catch (err) { console.warn('[AUDIO] notify cockpit failed:', err); }
+                }
 
-                currentAudio.onpause = () => {
-                    console.log('[AUDIO][EVENT] onpause');
-                    if (hasStartedPlaying && !currentAudio.ended) {
-                        console.log('⏸️ [VISION DEVICE] Audio paused by user');
-                        isAudioPaused = true;
+                // Override toggleAudioPlayback to use AudioContext pause/resume
+                window._xrToggleAudio = () => {
+                    if (!window._xrAudioBuffer) return;
+                    if (!window._xrAudioPaused) {
+                        // PAUSE: stop source, record offset
+                        window._xrAudioOffset += audioCtx.currentTime - window._xrAudioStartedAt;
+                        window._xrAudioPaused = true;
+                        if (window._xrAudioSource) {
+                            window._xrAudioSource.onended = null; // prevent false "finished"
+                            window._xrAudioSource.stop();
+                            window._xrAudioSource = null;
+                        }
                         isAudioPlaying = false;
+                        isAudioPaused = true;
                         startAudioTimeout();
                         setAudioBtnState(document.getElementById('btnAudio'), 'paused');
-                        console.log('✅ [VISION DEVICE] onpause: Button set to Play');
                         try {
                             if (signaling?.socket?.connected) {
-                                signaling.socket.emit('audio_state_changed', {
-                                    deviceId: ANDROID_XR_ID,
-                                    state: 'paused',
-                                    timestamp: Date.now()
-                                });
-                                console.log('✅ [AUDIO] Notified cockpit: audio paused');
+                                signaling.socket.emit('audio_state_changed', { deviceId: ANDROID_XR_ID, state: 'paused', timestamp: Date.now() });
                             }
-                        } catch (err) {
-                            console.warn('[AUDIO] Failed to notify cockpit:', err);
-                        }
+                        } catch (err) { console.warn('[AUDIO] notify cockpit failed:', err); }
+                        console.log('⏸️ [VISION DEVICE] Paused at offset:', window._xrAudioOffset);
+                    } else {
+                        // RESUME from where we left off
+                        _startSource(window._xrAudioOffset);
+                        console.log('▶️ [VISION DEVICE] Resumed from offset:', window._xrAudioOffset);
                     }
                 };
 
-                console.log('✅ [VISION DEVICE] Attempting to auto-play audio...');
+                // Wire the existing btnAudio click to our new toggle
+                if (btnAudio) {
+                    btnAudio.onclick = () => window._xrToggleAudio();
+                }
 
-                currentAudio.play().then(() => {
-                    msg('System', 'Playing summary audio');
-                    console.log('✅ [VISION DEVICE] Playing audio - SUCCESS');
-                }).catch(err => {
-                    console.error('❌ [VISION DEVICE] Playback error:', err);
-                    msg('System', '⚠️ Failed to play audio: ' + err.message);
-                    isAudioPlaying = false;
-                    setAudioBtnState(document.getElementById('btnAudio'), 'paused');
-                    console.log('❌ [VISION DEVICE] Play failed - button set to Play');
-                });
+                // Autoplay immediately
+                _startSource(0);
+                msg('System', 'Playing summary audio');
+                console.log('✅ [VISION DEVICE] Playing audio via AudioContext - SUCCESS');
 
             } catch (err) {
                 console.error('[AUDIO] Error processing audio:', err);
