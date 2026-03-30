@@ -22,6 +22,28 @@ async function synthesizeSpeech(text) {
     const aadToken = await getAzureSpeechToken();
     console.log(`[AZURE-TTS] ✅ Step 1 DONE: AAD token acquired (length: ${aadToken.length})`);
 
+    // 🔍 DEBUG: Independently verify token acquisition
+    try {
+      const { ManagedIdentityCredential, ClientSecretCredential } = require('@azure/identity');
+      let credential;
+      if (process.env.AZURE_CLIENT_ID && process.env.AZURE_CLIENT_SECRET && process.env.AZURE_TENANT_ID) {
+        credential = new ClientSecretCredential(
+          process.env.AZURE_TENANT_ID,
+          process.env.AZURE_CLIENT_ID,
+          process.env.AZURE_CLIENT_SECRET
+        );
+        console.log('[TTS] 🔍 Debug: Using ClientSecretCredential (SP)');
+      } else {
+        credential = new ManagedIdentityCredential(process.env.AZURE_CLIENT_ID_MI);
+        console.log('[TTS] 🔍 Debug: Using ManagedIdentityCredential (MI)');
+      }
+      const tokenResponse = await credential.getToken('https://cognitiveservices.azure.com/.default');
+      console.log('[TTS] ✅ Debug token acquired:', tokenResponse.token.substring(0, 20) + '...');
+      console.log('[TTS] 🔍 Token expiry:', new Date(tokenResponse.expiresOnTimestamp).toISOString());
+    } catch (err) {
+      console.error('[TTS] ❌ Debug token error:', err.message, err.stack);
+    }
+
     // Step 2: Build SpeechConfig using fromEndpoint + AAD token directly
     // Token API is disabled by VNet — so we skip /sts/v1.0/issueToken entirely
     // and pass the AAD token directly to the custom subdomain WebSocket endpoint
@@ -41,9 +63,11 @@ async function synthesizeSpeech(text) {
     synthesizer = new sdk.SpeechSynthesizer(speechConfig, null);
     console.log('[AZURE-TTS] ✅ Step 3 DONE: Synthesizer created');
 
-    // Step 4: Synthesize
+    // Step 4: Synthesize — with 60s timeout to prevent silent hang in production
+    const SYNTHESIS_TIMEOUT_MS = 60000;
     console.log(`[AZURE-TTS] 🔄 Step 4: Synthesizing text (${text.trim().length} chars)...`);
-    return await new Promise((resolve, reject) => {
+
+    const synthesisPromise = new Promise((resolve, reject) => {
       synthesizer.speakTextAsync(
         text.trim(),
         (result) => {
