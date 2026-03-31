@@ -6,83 +6,234 @@
     <title>XR Vision</title>
     <meta name="viewport"
         content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
-    <meta name="theme-color" content="#000000" />
+    <meta name="theme-color" content="#d8c6ec" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <link rel="manifest" href="/manifest.webmanifest">
 
-
-    <!-- Device-only PWA -->
-    <!-- <link rel="manifest" href="/device.webmanifest"> -->
     <link rel="icon" href="/public/images/xr-logo-192.png" sizes="192x192" />
     <link rel="apple-touch-icon" href="/public/images/xr-logo-192.png" />
 
     <link
-        href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=Exo+2:wght@300;400;500&display=swap"
+        href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700&family=Exo+2:wght@300;400;500;600;700&display=swap"
         rel="stylesheet">
-    <link rel="stylesheet" href="/public/css/device-orb.css" />
+    <link rel="stylesheet" href="/public/css/device-healthcare.css" />
 </head>
 
 <body>
     <div class="shell" id="shell">
         <canvas id="sc"></canvas>
 
-        <!-- XR Vision Logo -->
-        <div class="logo">
-            <svg viewBox="0 0 220 130" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <defs>
-                    <linearGradient id="xg" x1="0" y1="0" x2="1" y2="1">
-                        <stop offset="0%" stop-color="#4fc3f7" />
-                        <stop offset="40%" stop-color="#5c6bc0" />
-                        <stop offset="100%" stop-color="#7b1fa2" />
-                    </linearGradient>
-                    <linearGradient id="rg" x1="0" y1="0" x2="1" y2="1">
-                        <stop offset="0%" stop-color="#5c6bc0" />
-                        <stop offset="100%" stop-color="#7b1fa2" />
-                    </linearGradient>
-                    <filter id="glow">
-                        <feGaussianBlur stdDeviation="1.5" result="blur" />
-                        <feMerge>
-                            <feMergeNode in="blur" />
-                            <feMergeNode in="SourceGraphic" />
-                        </feMerge>
-                    </filter>
-                </defs>
-                <path d="M5 8 L32 52 L5 96 L22 96 L40 65 L58 96 L75 96 L48 52 L75 8 L58 8 L40 39 L22 8 Z"
-                    fill="url(#xg)" filter="url(#glow)" />
-                <path d="M82 8 L82 96 L98 96 L98 60 L118 96 L136 96 L114 57 C126 53 133 44 133 32 C133 18 123 8 108 8 Z
-                         M98 20 L106 20 C114 20 118 25 118 32 C118 39 114 44 106 44 L98 44 Z" fill="url(#rg)"
-                    filter="url(#glow)" />
-                <polyline points="140,52 152,52 158,34 164,70 170,42 176,62 182,52 210,52" stroke="#00e5ff"
-                    stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none" filter="url(#glow)" />
-                <rect x="194" y="18" width="6" height="24" rx="2" fill="#00e5ff" />
-                <rect x="186" y="26" width="22" height="6" rx="2" fill="#00e5ff" />
-                <ellipse cx="185" cy="72" rx="32" ry="9" stroke="#00e5ff" stroke-width="1.8" fill="none" opacity=".7"
-                    transform="rotate(-12 185 72)" />
-                <text x="48" y="120" font-family="'Orbitron',sans-serif" font-size="18" font-weight="600" fill="#ccc"
-                    letter-spacing="10" text-anchor="middle">VISION</text>
-            </svg>
+        <!-- ============ HEALTHCARE HEADER ============ -->
+        <div class="hc-header">
+            <div class="hc-logo">
+                <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <circle cx="24" cy="24" r="22" fill="#7c3aed" stroke="#5b21b6" stroke-width="1.5"/>
+                    <circle cx="24" cy="26" r="12" fill="#14b8a6"/>
+                    <rect x="20" y="20" width="8" height="12" rx="1" fill="#fff"/>
+                    <rect x="18" y="24" width="12" height="4" rx="1" fill="#fff"/>
+                    <path d="M14 16 Q24 8 34 16" stroke="#14b8a6" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+                    <circle cx="14" cy="16" r="2.5" fill="#14b8a6"/>
+                </svg>
+            </div>
+            <div class="hc-profile-area" id="hcProfileToggle">
+                <span class="hc-doctor-name" id="hcDoctorName"></span>
+                <div class="hc-profile-circle disconnected" id="hcProfileCircle">
+                    <div class="status-dot"></div>
+                </div>
+            </div>
         </div>
 
-        <!-- Status badge -->
-        <div class="badge" id="badge">
-            <div class="bdot off" id="bdot"></div>
-            <span class="btxt off" id="btxt">DISCONNECTED</span>
+        <!-- ============ PROFILE POPUP ============ -->
+        <div class="hc-popup-overlay" id="hcPopupOverlay"></div>
+        <div class="hc-profile-popup" id="hcProfilePopup">
+            <div class="hc-popup-name" id="hcPopupName">Doctor</div>
+            <div class="hc-popup-scribe" id="hcPopupScribe">
+                Assigned Scribe: <span id="hcPopupScribeName">--</span>
+                <span class="status-badge offline" id="hcPopupScribeBadge">Offline</span>
+            </div>
+            <button class="hc-popup-btn connect-btn" id="hcPopupConnect">Connect</button>
+            <button class="hc-popup-btn logout-btn" id="hcPopupLogout">Log out</button>
         </div>
 
-        <!-- Logout button -->
-        <button class="logout-btn" id="logoutBtn">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                <path d="M6 14H3C2.44772 14 2 13.5523 2 13V3C2 2.44772 2.44772 2 3 2H6" stroke="currentColor"
-                    stroke-width="1.5" stroke-linecap="round" />
-                <path d="M11 11L14 8M14 8L11 5M14 8H6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"
-                    stroke-linejoin="round" />
-            </svg>
-            <span>Logout</span>
-        </button>
+        <!-- ============ HOME: CENTER CONTENT ============ -->
+        <div class="hc-center-content" id="hcHomeContent">
+            <div class="hc-healthcare-logo">
+                <svg viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <defs>
+                        <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+                            <stop offset="0%" stop-color="#7c3aed"/>
+                            <stop offset="100%" stop-color="#5b21b6"/>
+                        </linearGradient>
+                    </defs>
+                    <path d="M100 20 C60 20 30 45 30 80 C30 100 40 110 55 120 L100 160 L145 120 C160 110 170 100 170 80 C170 45 140 20 100 20Z" fill="url(#bgGrad)"/>
+                    <circle cx="100" cy="88" r="40" fill="#14b8a6"/>
+                    <rect x="88" y="72" width="24" height="32" rx="2" fill="#fff"/>
+                    <rect x="84" y="82" width="32" height="12" rx="2" fill="#fff"/>
+                </svg>
+            </div>
+            <div class="hc-app-title"><strong>OG</strong> Clinical Assistant</div>
+        </div>
 
+        <!-- ============ BOTTOM NAV (3 buttons) ============ -->
+        <div class="hc-bottom-nav" id="hcBottomNav">
+            <button class="hc-nav-btn play-btn" id="hcPlayBtn" title="Start Stream">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                    <path d="M8 5.14v13.72a1 1 0 001.5.86l11.04-6.86a1 1 0 000-1.72L9.5 4.28A1 1 0 008 5.14z" fill="#fff"/>
+                </svg>
+            </button>
+            <button class="hc-nav-btn orb-btn" id="hcOrbBtn" title="Voice Command">
+                <svg width="28" height="28" viewBox="0 0 28 28" fill="none" opacity="0.9">
+                    <circle cx="14" cy="14" r="12" stroke="rgba(255,255,255,0.5)" stroke-width="1" fill="none"/>
+                    <circle cx="14" cy="14" r="7" stroke="rgba(255,255,255,0.6)" stroke-width="0.8" fill="none"/>
+                    <circle cx="14" cy="14" r="3" fill="rgba(255,255,255,0.7)"/>
+                </svg>
+            </button>
+            <button class="hc-nav-btn msg-btn" id="hcMsgBtn" title="Messages">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                    <path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z" fill="#fff"/>
+                    <circle cx="9" cy="12" r="1" fill="#7c3aed"/>
+                    <circle cx="13" cy="12" r="1" fill="#7c3aed"/>
+                    <circle cx="17" cy="12" r="1" fill="#7c3aed"/>
+                </svg>
+            </button>
+        </div>
 
-        <!-- ORB -->
+        <!-- ============ STREAM POPUP (FULLSCREEN) ============ -->
+        <div class="hc-stream-popup" id="hcStreamPopup">
+            <div class="hc-stream-video-wrap" id="hcStreamVideoWrap"></div>
+            <div class="hc-stream-overlay">
+                <div class="hc-stream-header">
+                    <div class="hc-logo">
+                        <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <circle cx="24" cy="24" r="22" fill="#7c3aed" stroke="#5b21b6" stroke-width="1.5"/>
+                            <circle cx="24" cy="26" r="12" fill="#14b8a6"/>
+                            <rect x="20" y="20" width="8" height="12" rx="1" fill="#fff"/>
+                            <rect x="18" y="24" width="12" height="4" rx="1" fill="#fff"/>
+                            <path d="M14 16 Q24 8 34 16" stroke="#14b8a6" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+                            <circle cx="14" cy="16" r="2.5" fill="#14b8a6"/>
+                        </svg>
+                    </div>
+                    <div class="hc-profile-area">
+                        <span class="hc-doctor-name" id="hcStreamDoctorName"></span>
+                        <div class="hc-profile-circle" id="hcStreamProfileCircle">
+                            <div class="status-dot"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="hc-stream-wave" id="hcStreamWave">
+                    <canvas id="hcWaveCanvas" width="280" height="100"></canvas>
+                </div>
+
+                <div class="hc-stream-transcription" id="hcTranscription">
+                    <div class="hc-transcript-prev" id="hcTranscriptPrev"></div>
+                    <div class="hc-transcript-current" id="hcTranscriptCurrent"></div>
+                    <div class="hc-transcript-next" id="hcTranscriptNext"></div>
+                </div>
+
+                <div class="hc-summary-display" id="hcSummaryDisplay" style="display:none">
+                    <div class="hc-summary-text" id="hcSummaryText"></div>
+                </div>
+
+                <div class="hc-stream-controls">
+                    <button class="hc-stream-ctrl-btn" id="hcStreamMuteBtn">Mute</button>
+                    <button class="hc-stream-ctrl-btn" id="hcStreamHideBtn">Hide</button>
+                    <button class="hc-stream-ctrl-btn" id="hcStreamPauseBtn">Pause</button>
+                </div>
+
+                <div class="hc-stream-bottom-nav">
+                    <button class="hc-nav-btn play-btn" id="hcStreamPlayBtn" title="Stop Stream">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                            <rect x="6" y="5" width="4" height="14" rx="1" fill="#fff"/>
+                            <rect x="14" y="5" width="4" height="14" rx="1" fill="#fff"/>
+                        </svg>
+                    </button>
+                    <button class="hc-nav-btn orb-btn" id="hcStreamOrbBtn" title="Voice Command">
+                        <svg width="28" height="28" viewBox="0 0 28 28" fill="none" opacity="0.9">
+                            <circle cx="14" cy="14" r="12" stroke="rgba(255,255,255,0.5)" stroke-width="1" fill="none"/>
+                            <circle cx="14" cy="14" r="7" stroke="rgba(255,255,255,0.6)" stroke-width="0.8" fill="none"/>
+                            <circle cx="14" cy="14" r="3" fill="rgba(255,255,255,0.7)"/>
+                        </svg>
+                    </button>
+                    <button class="hc-nav-btn msg-btn" id="hcStreamMsgBtn" title="Messages">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                            <path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z" fill="#fff"/>
+                            <circle cx="9" cy="12" r="1" fill="#7c3aed"/>
+                            <circle cx="13" cy="12" r="1" fill="#7c3aed"/>
+                            <circle cx="17" cy="12" r="1" fill="#7c3aed"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============ MESSAGES POPUP ============ -->
+        <div class="hc-msg-popup" id="hcMsgPopup">
+            <div class="hc-msg-header">
+                <div class="hc-logo">
+                    <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="24" cy="24" r="22" fill="#7c3aed" stroke="#5b21b6" stroke-width="1.5"/>
+                        <circle cx="24" cy="26" r="12" fill="#14b8a6"/>
+                        <rect x="20" y="20" width="8" height="12" rx="1" fill="#fff"/>
+                        <rect x="18" y="24" width="12" height="4" rx="1" fill="#fff"/>
+                        <path d="M14 16 Q24 8 34 16" stroke="#14b8a6" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+                        <circle cx="14" cy="16" r="2.5" fill="#14b8a6"/>
+                    </svg>
+                </div>
+                <div class="hc-profile-area">
+                    <span class="hc-doctor-name" id="hcMsgDoctorName"></span>
+                    <div class="hc-profile-circle" id="hcMsgProfileCircle">
+                        <div class="status-dot"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="hc-msg-body" id="hcMsgBody">
+                <div class="hc-msg-section" id="hcRecentMsgSection">
+                    <div class="hc-msg-section-title">Recent Messages</div>
+                    <div id="hcRecentMsgContent"></div>
+                </div>
+                <div class="hc-msg-section" id="hcMsgHistorySection">
+                    <div class="hc-msg-section-title">Message History</div>
+                    <div id="hcMsgHistoryContent"></div>
+                </div>
+            </div>
+
+            <div class="hc-msg-input-area">
+                <input type="text" class="hc-msg-input" id="hcMsgInput" placeholder="Type your message.....">
+                <button class="hc-msg-send-btn" id="hcMsgSendBtn">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+                        <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+            </div>
+
+            <div class="hc-stream-bottom-nav">
+                <button class="hc-nav-btn play-btn" id="hcMsgPlayBtn" title="Start Stream">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                        <path d="M8 5.14v13.72a1 1 0 001.5.86l11.04-6.86a1 1 0 000-1.72L9.5 4.28A1 1 0 008 5.14z" fill="#fff"/>
+                    </svg>
+                </button>
+                <button class="hc-nav-btn orb-btn" id="hcMsgOrbBtn" title="Voice Command">
+                    <svg width="28" height="28" viewBox="0 0 28 28" fill="none" opacity="0.9">
+                        <circle cx="14" cy="14" r="12" stroke="rgba(255,255,255,0.5)" stroke-width="1" fill="none"/>
+                        <circle cx="14" cy="14" r="7" stroke="rgba(255,255,255,0.6)" stroke-width="0.8" fill="none"/>
+                        <circle cx="14" cy="14" r="3" fill="rgba(255,255,255,0.7)"/>
+                    </svg>
+                </button>
+                <button class="hc-nav-btn msg-btn" id="hcMsgMsgBtn" title="Messages">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                        <path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z" fill="#fff"/>
+                        <circle cx="9" cy="12" r="1" fill="#7c3aed"/>
+                        <circle cx="13" cy="12" r="1" fill="#7c3aed"/>
+                        <circle cx="17" cy="12" r="1" fill="#7c3aed"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <!-- ============ OLD ORB (hidden, needed by device-canvas.js) ============ -->
         <div class="orb-root" id="orbVisual">
             <div class="halo"></div>
             <div class="ground"></div>
@@ -95,101 +246,44 @@
             </div>
         </div>
 
-        <!-- Response box -->
         <div class="resp" id="responseCard">
-            <div class="rtxt" id="responseText">Your XR assistant response appears here...</div>
+            <div class="rtxt" id="responseText"></div>
         </div>
 
-
-
-        <!-- Mic button -->
         <div class="mic-wrap">
             <div class="mic-zone" id="micButton">
-                <div class="mic-btn" id="mb">
-                    <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-                        <rect x="9" y="2" width="10" height="15" rx="5" fill="rgba(0,215,255,.92)" />
-                        <path d="M4 13C4 18.5 8.5 23 14 23" stroke="rgba(0,215,255,.92)" stroke-width="2"
-                            stroke-linecap="round" fill="none" />
-                        <path d="M24 13C24 18.5 19.5 23 14 23" stroke="rgba(0,215,255,.92)" stroke-width="2"
-                            stroke-linecap="round" fill="none" />
-                        <line x1="14" y1="23" x2="14" y2="27" stroke="rgba(0,215,255,.92)" stroke-width="2"
-                            stroke-linecap="round" />
-                        <line x1="10" y1="27" x2="18" y2="27" stroke="rgba(0,215,255,.92)" stroke-width="2"
-                            stroke-linecap="round" />
-                    </svg>
-                </div>
+                <div class="mic-btn" id="mb"></div>
             </div>
-            <div class="mic-lbl" id="micInstruction">Hold to <b>Speak</b></div>
+            <div class="mic-lbl" id="micInstruction"></div>
         </div>
 
-        <!-- Manual Controls Panel -->
         <div class="control-panel" id="controlPanel">
-            <!-- XR ID Display -->
             <div class="xr-id-section">
                 <input type="text" id="xrIdDisplay" class="xr-id-display" readonly placeholder="XR-ID" />
-                <!-- ✅ FIX: Peer Online/Offline Status -->
                 <div id="peerStatusDisplay" class="peer-status-display" style="display: none;">
                     <span id="peerStatusText"></span>
                 </div>
             </div>
-
-
-
-
-            <!-- Manual Control Buttons -->
             <div class="manual-controls">
-                <button class="control-btn" id="manualStreamBtn" data-action="stream">
-                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                        <circle cx="8" cy="8" r="7" stroke="currentColor" stroke-width="1.5" />
-                        <circle cx="8" cy="8" r="3" fill="currentColor" />
-                    </svg>
-                    <span>Start Stream</span>
-                </button>
-
-                <button class="control-btn" id="manualMuteBtn" data-action="mute">
-                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                        <path d="M8 2v12M5 5l6 6M11 5l-6 6" stroke="currentColor" stroke-width="1.5"
-                            stroke-linecap="round" />
-                    </svg>
-                    <span>Mute</span>
-                </button>
-                <button class="control-btn" id="manualVideoBtn" data-action="video">
-                    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                        <rect x="2" y="4" width="9" height="8" rx="1" stroke="currentColor" stroke-width="1.5" />
-                        <path d="M11 6l3-2v8l-3-2" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" />
-                    </svg>
-                    <span>Hide Video</span>
-                </button>
-
-                <button class="control-btn audio-btn-panel" id="btnAudio" disabled
-                    title="Enabled when scribe plays summary">
-                    <svg width="13" height="13" viewBox="0 0 13 13" fill="none">
-                        <path d="M2.5 1.5L11 6.5L2.5 11.5V1.5Z" fill="currentColor" />
-                    </svg>
-                    <span id="audioLabel">Audio</span>
-                </button>
+                <button class="control-btn" id="manualStreamBtn" data-action="stream"><span>Start Stream</span></button>
+                <button class="control-btn" id="manualMuteBtn" data-action="mute"><span>Mute</span></button>
+                <button class="control-btn" id="manualVideoBtn" data-action="video"><span>Hide Video</span></button>
+                <button class="control-btn audio-btn-panel" id="btnAudio" disabled><span id="audioLabel">Audio</span></button>
             </div>
-
-
-            <!-- Messages Section -->
             <div class="messages-section">
                 <div class="messages-header">Messages</div>
                 <div class="messages-list" id="visibleMsgList"></div>
                 <div class="message-input-section">
                     <input type="text" id="visibleMsgInput" class="msg-input" placeholder="Type a message..." />
-                    <label class="urgent-checkbox">
-                        <input type="checkbox" id="visibleChkUrgent" />
-                        <span>Urgent</span>
-                    </label>
+                    <label class="urgent-checkbox"><input type="checkbox" id="visibleChkUrgent" /><span>Urgent</span></label>
                     <button class="send-btn" id="visibleBtnSend">Send</button>
                 </div>
             </div>
         </div>
 
-
         <div class="toast" id="toast"></div>
 
-        <!-- Hidden functional elements for ui.js -->
+        <!-- Hidden functional elements for ui.js (UNCHANGED) -->
         <div id="status" class="status status-disconnected" hidden>Status: Disconnected</div>
         <div id="chipLastCmd" hidden>Heard: ...</div>
 
@@ -213,15 +307,16 @@
             <input id="chkUrgent" type="checkbox" />
             <button id="btnSend">Send</button>
         </div>
+
+        <!-- Old logout button (hidden, but ID preserved for existing logout handler) -->
+        <button id="logoutBtn" class="old-logout" hidden></button>
     </div>
 
     <script src="/socket.io/socket.io.js"></script>
     <script src="/public/js/config.js"></script>
-
-    <!-- Canvas rendering (starfield + wave) -->
     <script src="/public/js/device-canvas.js"></script>
-
     <script type="module" src="/public/js/ui.js"></script>
+    <script src="/public/js/device-healthcare-ui.js"></script>
 
     <script>
         async function maybeRegisterSW() {
@@ -257,7 +352,6 @@
         });
     </script>
 
-    <!-- Platform logout cross-tab listener -->
     <script>
         (function () {
             function handleXrLogout() {
@@ -265,7 +359,6 @@
                 try { window.close(); } catch (e) { }
                 setTimeout(function () { window.location.href = '/platform'; }, 300);
             }
-
             try {
                 if (typeof BroadcastChannel !== 'undefined') {
                     var ch = new BroadcastChannel('xr_platform_auth');
@@ -283,66 +376,42 @@
         })();
     </script>
 
-
-    <!-- ✅ MANUAL LOGOUT: Logout button handler -->
     <script>
-        // Manual logout button click handler
-        const logoutBtn = document.getElementById('logoutBtn');
-        if (logoutBtn) {
-            logoutBtn.addEventListener('click', async function () {
+        var logoutBtn = document.getElementById('logoutBtn');
+        var hcPopupLogout = document.getElementById('hcPopupLogout');
+
+        function doLogout() {
+            (async function () {
                 try {
                     console.log('[DEVICE] Manual logout initiated');
-
-                    // ✅ FIX: Clear sessionStorage BEFORE logout to prevent stale XR ID
                     try {
                         sessionStorage.removeItem('XR_DEVICE_LAST_XR_ID_UI');
                         sessionStorage.removeItem('xr-device-id');
-                        console.log('[DEVICE] SessionStorage cleared on logout');
-                    } catch (e) {
-                        console.warn('[DEVICE] Failed to clear sessionStorage:', e);
-                    }
-
-                    // Call logout API
-                    const response = await fetch('/api/platform/logout', {
+                    } catch (e) { }
+                    var response = await fetch('/api/platform/logout', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         credentials: 'include'
                     });
-
-                    const data = await response.json();
-
-                    if (data.ok) {
-                        console.log('[DEVICE] Logout successful, redirecting to login page');
-                        history.replaceState(null, '', '/platform');
-                        window.location.replace('/platform');
-
-
-                    } else {
-                        console.error('[DEVICE] Logout failed:', data.message);
-                        history.replaceState(null, '', '/platform');
-                        window.location.replace('/platform');
-
-                    }
+                    var data = await response.json();
+                    history.replaceState(null, '', '/platform');
+                    window.location.replace('/platform');
                 } catch (err) {
                     console.error('[DEVICE] Logout error:', err);
-
-                    // ✅ FIX: Clear sessionStorage even if logout API fails
                     try {
                         sessionStorage.removeItem('XR_DEVICE_LAST_XR_ID_UI');
                         sessionStorage.removeItem('xr-device-id');
-                    } catch (e) {
-                        console.warn('[DEVICE] Failed to clear sessionStorage:', e);
-                    }
-
+                    } catch (e) { }
                     history.replaceState(null, '', '/platform');
                     window.location.replace('/platform');
-
                 }
-            });
+            })();
         }
+
+        if (logoutBtn) logoutBtn.addEventListener('click', doLogout);
+        if (hcPopupLogout) hcPopupLogout.addEventListener('click', doLogout);
     </script>
 
-    <!-- Session guard: redirect to login if not authenticated when page loads -->
     <script>
         (function () {
             fetch('/api/platform/me', {
@@ -363,8 +432,6 @@
             });
         })();
     </script>
-
-
 
 </body>
 
