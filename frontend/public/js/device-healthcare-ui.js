@@ -98,6 +98,7 @@
   function openStreamPopup() {
     if (streamPopup) streamPopup.classList.add('show');
     if (msgPopup) msgPopup.classList.remove('show');
+    if (soloTranscript) soloTranscript.classList.remove('show');
 
     if (hiddenPreview && streamVideoWrap) {
       hiddenPreview.hidden = false;
@@ -449,6 +450,10 @@
     }
   }
 
+  var soloTranscript = document.getElementById('hcSoloTranscript');
+  var soloTranscriptCurrent = document.getElementById('hcSoloTranscriptCurrent');
+  var soloTranscriptPrev = document.getElementById('hcSoloTranscriptPrev');
+
   function syncTranscript() {
     var chipEl = document.getElementById('chipLastCmd');
     if (!chipEl) return;
@@ -462,7 +467,21 @@
           if (hcTranscriptPrev) hcTranscriptPrev.textContent = prev;
         }
         hcTranscriptCurrent.textContent = clean;
+
+        var streamOpen = streamPopup && streamPopup.classList.contains('show');
+        if (!streamOpen && soloTranscript && soloTranscriptCurrent) {
+          var soloPrev = soloTranscriptCurrent.textContent || '';
+          if (soloPrev && soloPrev !== clean) {
+            if (soloTranscriptPrev) soloTranscriptPrev.textContent = soloPrev;
+          }
+          soloTranscriptCurrent.textContent = clean;
+          soloTranscript.classList.add('show');
+        } else if (streamOpen && soloTranscript) {
+          soloTranscript.classList.remove('show');
+        }
       }
+    } else {
+      if (soloTranscript) soloTranscript.classList.remove('show');
     }
   }
 

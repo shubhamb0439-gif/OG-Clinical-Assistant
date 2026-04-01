@@ -617,6 +617,23 @@ html,body{
 .mic-wrap{display:none!important}
 .control-panel{display:none!important}
 .toast{display:none!important}
+#chipLastCmd{display:none!important}
+
+.hc-solo-transcript{
+  position:absolute;
+  left:0;right:0;
+  top:50%;
+  transform:translateY(-50%);
+  z-index:35;
+  text-align:center;
+  padding:0 30px;
+  pointer-events:none;
+  display:none;
+}
+
+.hc-solo-transcript.show{
+  display:block;
+}
 
 .hc-summary-display{
   text-align:center;
