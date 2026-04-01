@@ -10,8 +10,6 @@
   var popupNameEl = document.getElementById('hcPopupName');
   var popupScribeNameEl = document.getElementById('hcPopupScribeName');
   var popupScribeBadgeEl = document.getElementById('hcPopupScribeBadge');
-  var popupConnStatus = document.getElementById('hcPopupConnStatus');
-  var popupConnLabel = document.getElementById('hcPopupConnLabel');
 
   var streamDoctorName = document.getElementById('hcStreamDoctorName');
   var streamProfileCircle = document.getElementById('hcStreamProfileCircle');
@@ -64,6 +62,9 @@
   var hiddenBtxt = document.getElementById('btxt');
   var hiddenXrIdDisplay = document.getElementById('xrIdDisplay');
   var peerStatusText = document.getElementById('peerStatusText');
+
+  var transcriptLines = [];
+  var currentTranscriptIdx = 0;
 
   function closeAllPopups() {
     if (profilePopup) profilePopup.classList.remove('show');
@@ -312,17 +313,6 @@
         popupConnect.textContent = 'Connect';
         popupConnect.classList.remove('connected');
       }
-    }
-
-    if (popupConnStatus) {
-      if (isConnected) {
-        popupConnStatus.className = 'hc-popup-conn-status connected';
-      } else {
-        popupConnStatus.className = 'hc-popup-conn-status disconnected';
-      }
-    }
-    if (popupConnLabel) {
-      popupConnLabel.textContent = isConnected ? 'Connected' : 'Disconnected';
     }
 
     var name = '';
