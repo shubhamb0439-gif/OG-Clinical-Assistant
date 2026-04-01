@@ -132,12 +132,6 @@
   if (playBtn) {
     playBtn.addEventListener('click', function () {
       if (hiddenStream) hiddenStream.click();
-      setTimeout(function () {
-        var streamActive = hiddenStream && hiddenStream.textContent.trim().toLowerCase().indexOf('stop') >= 0;
-        if (streamActive) {
-          openStreamPopup();
-        }
-      }, 300);
     });
   }
 
@@ -156,13 +150,8 @@
 
   if (streamPlayBtn) {
     streamPlayBtn.addEventListener('click', function () {
+      closeStreamPopup();
       if (hiddenStream) hiddenStream.click();
-      setTimeout(function () {
-        var streamActive = hiddenStream && hiddenStream.textContent.trim().toLowerCase().indexOf('stop') >= 0;
-        if (!streamActive) {
-          closeStreamPopup();
-        }
-      }, 300);
     });
   }
 
@@ -206,12 +195,6 @@
     msgPlayBtn.addEventListener('click', function () {
       closeMsgPopup();
       if (hiddenStream) hiddenStream.click();
-      setTimeout(function () {
-        var streamActive = hiddenStream && hiddenStream.textContent.trim().toLowerCase().indexOf('stop') >= 0;
-        if (streamActive) {
-          openStreamPopup();
-        }
-      }, 300);
     });
   }
 
@@ -529,5 +512,21 @@
     syncConnectionStatus();
     syncMessages();
   }, 1000);
+
+  if (hiddenStream) {
+    var lastStreamText = hiddenStream.textContent.trim().toLowerCase();
+    var streamObserver = new MutationObserver(function () {
+      var newText = hiddenStream.textContent.trim().toLowerCase();
+      if (newText === lastStreamText) return;
+      lastStreamText = newText;
+      var nowActive = newText.indexOf('stop') >= 0;
+      if (nowActive) {
+        openStreamPopup();
+      } else {
+        closeStreamPopup();
+      }
+    });
+    streamObserver.observe(hiddenStream, { childList: true, subtree: true, characterData: true });
+  }
 
 })();
