@@ -82,6 +82,20 @@ html,body{
   background:#ef4444;
 }
 
+.hc-profile-circle .circle-initials{
+  font-size:11px;
+  font-weight:700;
+  color:#22c55e;
+  letter-spacing:0.5px;
+  line-height:1;
+  transition:color 0.3s;
+  user-select:none;
+}
+
+.hc-profile-circle.disconnected .circle-initials{
+  color:#ef4444;
+}
+
 .hc-center-content{
   position:absolute;
   top:50%;left:50%;
@@ -253,20 +267,23 @@ html,body{
 
 .hc-popup-scribe .status-badge{
   display:inline-block;
-  padding:2px 8px;
+  padding:3px 10px;
   border-radius:10px;
-  font-size:11px;
-  font-weight:600;
+  font-size:12px;
+  font-weight:700;
+  letter-spacing:0.3px;
 }
 
 .hc-popup-scribe .status-badge.online{
-  background:rgba(34,197,94,0.15);
-  color:#16a34a;
+  background:rgba(34,197,94,0.18);
+  color:#15803d;
+  border:1px solid rgba(34,197,94,0.35);
 }
 
 .hc-popup-scribe .status-badge.offline{
   background:rgba(239,68,68,0.15);
-  color:#dc2626;
+  color:#b91c1c;
+  border:1px solid rgba(239,68,68,0.35);
 }
 
 .hc-popup-btn{

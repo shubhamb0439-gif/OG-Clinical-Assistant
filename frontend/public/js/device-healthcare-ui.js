@@ -233,6 +233,30 @@
     });
   }
 
+  function isSystemMessage(senderText, msgText) {
+    var s = (senderText || '').toLowerCase().trim();
+    var t = (msgText || '').toLowerCase().trim();
+    if (s === 'system' || s === 'voice' || s === 'note') return true;
+    if (t.indexOf('connected to server') >= 0) return true;
+    if (t.indexOf('disconnected from server') >= 0) return true;
+    if (t.indexOf('connecting') >= 0 && t.indexOf('…') >= 0) return true;
+    if (t.indexOf('connected as xr device') >= 0) return true;
+    if (t.indexOf('stream started') >= 0) return true;
+    if (t.indexOf('stream stopped') >= 0) return true;
+    if (t.indexOf('paired with') >= 0) return true;
+    if (t.indexOf('desktop connected') >= 0) return true;
+    if (t.indexOf('is online') >= 0) return true;
+    if (t.indexOf('is offline') >= 0) return true;
+    if (t.indexOf('voice recognition') >= 0) return true;
+    if (t.indexOf('unrecognized command') >= 0) return true;
+    if (t.indexOf('note saved') >= 0) return true;
+    if (t.indexOf('note recording') >= 0) return true;
+    if (t.indexOf('disconnecting') >= 0) return true;
+    if (t.indexOf('no desktops available') >= 0) return true;
+    if (t.indexOf('microphone') >= 0) return true;
+    return false;
+  }
+
   function syncMessages() {
     if (!hiddenMsgList) return;
 
@@ -242,20 +266,27 @@
 
     var allItems = Array.prototype.slice.call(items);
 
-    if (allItems.length > 0) {
-      var last = allItems[allItems.length - 1];
+    var realItems = allItems.filter(function (item) {
+      var sender = item.querySelector('.msg-header');
+      var text = item.querySelector('.msg-text');
+      var senderText = sender ? sender.textContent.replace(/URGENT/g, '').trim() : '';
+      var msgText = text ? text.textContent : '';
+      return !isSystemMessage(senderText, msgText);
+    });
+
+    if (realItems.length > 0) {
+      var last = realItems[realItems.length - 1];
       var lastSender = last.querySelector('.msg-header');
       var lastText = last.querySelector('.msg-text');
-      var lastTime = last.querySelector('.msg-timestamp');
 
       recentHtml = '<div class="hc-msg-item"><div class="hc-msg-item-header"><div>';
-      recentHtml += '<div class="hc-msg-sender">' + escapeHtml(lastSender ? lastSender.textContent : '') + '</div>';
+      recentHtml += '<div class="hc-msg-sender">' + escapeHtml(lastSender ? lastSender.textContent.replace(/URGENT/g, '').trim() : '') + '</div>';
       recentHtml += '</div><button class="hc-msg-reply-btn" onclick="document.getElementById(\'hcMsgInput\').focus()">Reply</button></div>';
       recentHtml += '<div class="hc-msg-text">' + escapeHtml(lastText ? lastText.textContent : '') + '</div></div>';
     }
 
-    for (var i = allItems.length - 1; i >= 0; i--) {
-      var item = allItems[i];
+    for (var i = realItems.length - 1; i >= 0; i--) {
+      var item = realItems[i];
       var sender = item.querySelector('.msg-header');
       var text = item.querySelector('.msg-text');
       var time = item.querySelector('.msg-timestamp');
@@ -264,25 +295,19 @@
       var msgText = text ? text.textContent : '';
       var timeText = time ? time.textContent : '';
 
-      var msgType = 'MESSAGE';
-      if (msgText.toLowerCase().indexOf('voice') >= 0 || msgText.toLowerCase().indexOf('unrecognized') >= 0) {
-        msgType = 'VOICE';
-      } else if (msgText.toLowerCase().indexOf('note') >= 0) {
-        msgType = 'NOTE';
-      }
+      var isUrgent = item.classList.contains('msg-urgent');
 
-      historyHtml += '<div class="hc-msg-item">';
+      historyHtml += '<div class="hc-msg-item' + (isUrgent ? ' hc-msg-urgent' : '') + '">';
       historyHtml += '<div class="hc-msg-item-header">';
-      historyHtml += '<div><div class="hc-msg-sender">' + escapeHtml(senderText) + '</div>';
-      historyHtml += '<div class="hc-msg-type">' + msgType + '</div></div>';
+      historyHtml += '<div><div class="hc-msg-sender">' + escapeHtml(senderText) + '</div></div>';
       historyHtml += '<div class="hc-msg-time">' + escapeHtml(timeText) + '</div>';
       historyHtml += '</div>';
       historyHtml += '<div class="hc-msg-text">' + escapeHtml(msgText) + '</div>';
       historyHtml += '</div>';
     }
 
-    if (hcRecentMsgContent) hcRecentMsgContent.innerHTML = recentHtml || '<div class="hc-msg-text" style="color:#9ca3af">No messages yet</div>';
-    if (hcMsgHistoryContent) hcMsgHistoryContent.innerHTML = historyHtml || '<div class="hc-msg-text" style="color:#9ca3af">No message history</div>';
+    if (hcRecentMsgContent) hcRecentMsgContent.innerHTML = recentHtml || '';
+    if (hcMsgHistoryContent) hcMsgHistoryContent.innerHTML = historyHtml || '';
   }
 
   function escapeHtml(s) {
@@ -290,6 +315,33 @@
     div.textContent = s || '';
     return div.innerHTML;
   }
+
+  function getInitials(name) {
+    var parts = (name || '').trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return '';
+    if (parts.length === 1) return parts[0].charAt(0).toUpperCase();
+    return (parts[0].charAt(0) + parts[parts.length - 1].charAt(0)).toUpperCase();
+  }
+
+  function updateCircleInitials(circle, initials) {
+    if (!circle) return;
+    var dot = circle.querySelector('.status-dot');
+    var initialsEl = circle.querySelector('.circle-initials');
+    if (initials) {
+      if (dot) dot.style.display = 'none';
+      if (!initialsEl) {
+        initialsEl = document.createElement('span');
+        initialsEl.className = 'circle-initials';
+        circle.appendChild(initialsEl);
+      }
+      initialsEl.textContent = initials;
+    } else {
+      if (dot) dot.style.display = '';
+      if (initialsEl) initialsEl.textContent = '';
+    }
+  }
+
+  var lastInitials = '';
 
   function syncConnectionStatus() {
     var isConnected = hiddenBdot && !hiddenBdot.classList.contains('off');
@@ -321,6 +373,14 @@
     }
     if (!name && window.XR_DEVICE_ID) {
       name = window.XR_DEVICE_ID;
+    }
+
+    var initials = getInitials(name);
+    if (initials !== lastInitials) {
+      lastInitials = initials;
+      updateCircleInitials(profileCircle, initials);
+      updateCircleInitials(streamProfileCircle, initials);
+      updateCircleInitials(msgProfileCircle, initials);
     }
 
     var allNames = [doctorNameEl, streamDoctorName, msgDoctorName];
