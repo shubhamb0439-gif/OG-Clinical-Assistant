@@ -1,4 +1,243 @@
-;
+(function () {
+  'use strict';
+
+  var profileToggle = document.getElementById('hcProfileToggle');
+  var profilePopup = document.getElementById('hcProfilePopup');
+  var popupOverlay = document.getElementById('hcPopupOverlay');
+  var popupConnect = document.getElementById('hcPopupConnect');
+  var profileCircle = document.getElementById('hcProfileCircle');
+  var doctorNameEl = document.getElementById('hcDoctorName');
+  var popupNameEl = document.getElementById('hcPopupName');
+  var popupScribeNameEl = document.getElementById('hcPopupScribeName');
+  var popupScribeBadgeEl = document.getElementById('hcPopupScribeBadge');
+
+  var streamDoctorName = document.getElementById('hcStreamDoctorName');
+  var streamProfileCircle = document.getElementById('hcStreamProfileCircle');
+  var msgDoctorName = document.getElementById('hcMsgDoctorName');
+  var msgProfileCircle = document.getElementById('hcMsgProfileCircle');
+
+  var homeContent = document.getElementById('hcHomeContent');
+  var bottomNav = document.getElementById('hcBottomNav');
+
+  var playBtn = document.getElementById('hcPlayBtn');
+  var orbBtn = document.getElementById('hcOrbBtn');
+  var msgBtn = document.getElementById('hcMsgBtn');
+
+  var streamPopup = document.getElementById('hcStreamPopup');
+  var streamVideoWrap = document.getElementById('hcStreamVideoWrap');
+  var streamMuteBtn = document.getElementById('hcStreamMuteBtn');
+  var streamHideBtn = document.getElementById('hcStreamHideBtn');
+  var streamPauseBtn = document.getElementById('hcStreamPauseBtn');
+  var streamPlayBtn = document.getElementById('hcStreamPlayBtn');
+  var streamOrbBtn = document.getElementById('hcStreamOrbBtn');
+  var streamMsgBtn = document.getElementById('hcStreamMsgBtn');
+
+  var msgPopup = document.getElementById('hcMsgPopup');
+  var msgPlayBtn = document.getElementById('hcMsgPlayBtn');
+  var msgOrbBtn = document.getElementById('hcMsgOrbBtn');
+  var msgMsgBtn = document.getElementById('hcMsgMsgBtn');
+  var hcMsgInput = document.getElementById('hcMsgInput');
+  var hcMsgSendBtn = document.getElementById('hcMsgSendBtn');
+  var hcRecentMsgContent = document.getElementById('hcRecentMsgContent');
+  var hcMsgHistoryContent = document.getElementById('hcMsgHistoryContent');
+
+  var hcWaveCanvas = document.getElementById('hcWaveCanvas');
+  var hcTranscriptCurrent = document.getElementById('hcTranscriptCurrent');
+  var hcTranscriptPrev = document.getElementById('hcTranscriptPrev');
+  var hcTranscriptNext = document.getElementById('hcTranscriptNext');
+  var hcSummaryDisplay = document.getElementById('hcSummaryDisplay');
+  var hcSummaryText = document.getElementById('hcSummaryText');
+
+  var hiddenConnect = document.getElementById('btnConnect');
+  var hiddenStream = document.getElementById('btnStream');
+  var hiddenMute = document.getElementById('btnMute');
+  var hiddenVideo = document.getElementById('btnVideo');
+  var hiddenVoice = document.getElementById('btnVoice');
+  var hiddenSend = document.getElementById('btnSend');
+  var hiddenMsgInput = document.getElementById('msgInput');
+  var hiddenChkUrgent = document.getElementById('chkUrgent');
+  var hiddenMsgList = document.getElementById('msgList');
+  var hiddenPreview = document.getElementById('preview');
+  var hiddenBdot = document.getElementById('bdot');
+  var hiddenBtxt = document.getElementById('btxt');
+  var hiddenXrIdDisplay = document.getElementById('xrIdDisplay');
+  var peerStatusText = document.getElementById('peerStatusText');
+
+  var transcriptLines = [];
+  var currentTranscriptIdx = 0;
+
+  function closeAllPopups() {
+    if (profilePopup) profilePopup.classList.remove('show');
+    if (popupOverlay) popupOverlay.classList.remove('show');
+  }
+
+  if (profileToggle) {
+    profileToggle.addEventListener('click', function (e) {
+      e.stopPropagation();
+      var isOpen = profilePopup && profilePopup.classList.contains('show');
+      if (isOpen) {
+        closeAllPopups();
+      } else {
+        if (profilePopup) profilePopup.classList.add('show');
+        if (popupOverlay) popupOverlay.classList.add('show');
+      }
+    });
+  }
+
+  if (popupOverlay) {
+    popupOverlay.addEventListener('click', closeAllPopups);
+  }
+
+  if (popupConnect) {
+    popupConnect.addEventListener('click', function () {
+      if (hiddenConnect) hiddenConnect.click();
+      closeAllPopups();
+    });
+  }
+
+  function openStreamPopup() {
+    if (streamPopup) streamPopup.classList.add('show');
+    if (msgPopup) msgPopup.classList.remove('show');
+
+    if (hiddenPreview && streamVideoWrap) {
+      hiddenPreview.hidden = false;
+      hiddenPreview.style.cssText = 'width:100%;height:100%;object-fit:cover;transform:scaleX(-1);position:absolute;inset:0;';
+      streamVideoWrap.appendChild(hiddenPreview);
+    }
+    startStreamWaveAnimation();
+  }
+
+  function closeStreamPopup() {
+    if (streamPopup) streamPopup.classList.remove('show');
+    stopStreamWaveAnimation();
+
+    if (hiddenPreview) {
+      hiddenPreview.hidden = true;
+      hiddenPreview.style.cssText = '';
+      var shell = document.getElementById('shell');
+      if (shell) shell.appendChild(hiddenPreview);
+    }
+  }
+
+  function openMsgPopup() {
+    if (msgPopup) msgPopup.classList.add('show');
+    if (streamPopup) streamPopup.classList.remove('show');
+    syncMessages();
+  }
+
+  function closeMsgPopup() {
+    if (msgPopup) msgPopup.classList.remove('show');
+  }
+
+  if (playBtn) {
+    playBtn.addEventListener('click', function () {
+      if (hiddenStream) hiddenStream.click();
+      setTimeout(function () {
+        var streamActive = hiddenStream && hiddenStream.textContent.trim().toLowerCase().indexOf('stop') >= 0;
+        if (streamActive) {
+          openStreamPopup();
+        }
+      }, 300);
+    });
+  }
+
+  if (orbBtn) {
+    orbBtn.addEventListener('click', function () {
+      if (hiddenVoice) hiddenVoice.click();
+      orbBtn.classList.toggle('active');
+    });
+  }
+
+  if (msgBtn) {
+    msgBtn.addEventListener('click', function () {
+      openMsgPopup();
+    });
+  }
+
+  if (streamPlayBtn) {
+    streamPlayBtn.addEventListener('click', function () {
+      if (hiddenStream) hiddenStream.click();
+      setTimeout(function () {
+        var streamActive = hiddenStream && hiddenStream.textContent.trim().toLowerCase().indexOf('stop') >= 0;
+        if (!streamActive) {
+          closeStreamPopup();
+        }
+      }, 300);
+    });
+  }
+
+  if (streamOrbBtn) {
+    streamOrbBtn.addEventListener('click', function () {
+      if (hiddenVoice) hiddenVoice.click();
+      streamOrbBtn.classList.toggle('active');
+      if (orbBtn) orbBtn.classList.toggle('active');
+    });
+  }
+
+  if (streamMsgBtn) {
+    streamMsgBtn.addEventListener('click', function () {
+      closeStreamPopup();
+      openMsgPopup();
+    });
+  }
+
+  if (streamMuteBtn) {
+    streamMuteBtn.addEventListener('click', function () {
+      if (hiddenMute) hiddenMute.click();
+    });
+  }
+
+  if (streamHideBtn) {
+    streamHideBtn.addEventListener('click', function () {
+      if (hiddenVideo) hiddenVideo.click();
+    });
+  }
+
+  if (streamPauseBtn) {
+    streamPauseBtn.addEventListener('click', function () {
+      var btnAudio = document.getElementById('btnAudio');
+      if (btnAudio && !btnAudio.disabled) {
+        btnAudio.click();
+      }
+    });
+  }
+
+  if (msgPlayBtn) {
+    msgPlayBtn.addEventListener('click', function () {
+      closeMsgPopup();
+      if (hiddenStream) hiddenStream.click();
+      setTimeout(function () {
+        var streamActive = hiddenStream && hiddenStream.textContent.trim().toLowerCase().indexOf('stop') >= 0;
+        if (streamActive) {
+          openStreamPopup();
+        }
+      }, 300);
+    });
+  }
+
+  if (msgOrbBtn) {
+    msgOrbBtn.addEventListener('click', function () {
+      if (hiddenVoice) hiddenVoice.click();
+      if (orbBtn) orbBtn.classList.toggle('active');
+    });
+  }
+
+  if (msgMsgBtn) {
+    msgMsgBtn.addEventListener('click', function () {
+      closeMsgPopup();
+    });
+  }
+
+  if (hcMsgSendBtn) {
+    hcMsgSendBtn.addEventListener('click', function () {
+      var text = (hcMsgInput && hcMsgInput.value || '').trim();
+      if (!text) return;
+
+      if (hiddenMsgInput) hiddenMsgInput.value = text;
+      if (hiddenChkUrgent) hiddenChkUrgent.checked = false;
+      if (hiddenSend) hiddenSend.click();
+
+      if (hcMsgInput) hcMsgInput.value = '';
       setTimeout(syncMessages, 200);
     });
   }
