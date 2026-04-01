@@ -214,45 +214,29 @@ html,body{
 
 .mic-btn{
   width:68px;height:68px;border-radius:50%;
-  background:transparent;
+  background:radial-gradient(ellipse at 42% 30%,rgba(45,115,225,.72),rgba(8,28,95,.97));
   border:2px solid rgba(0,188,255,.52);
   display:flex;align-items:center;justify-content:center;
-  overflow:hidden;
   box-shadow:
     0 0 22px rgba(0,155,255,.32),
-    0 0 50px rgba(0,105,255,.14);
-  transition:transform .2s ease,box-shadow .3s ease,border-color .3s ease;
+    0 0 50px rgba(0,105,255,.14),
+    inset 0 1px 0 rgba(255,255,255,.14),
+    inset 0 0 18px rgba(0,182,255,.09);
+  transition:transform .15s,box-shadow .3s,background .3s,border-color .3s;
   user-select:none;-webkit-user-select:none;
-}
-.mic-video{
-  width:100%;height:100%;object-fit:cover;border-radius:50%;display:block;
-  pointer-events:none;
 }
 .mic-btn:active{transform:scale(.91)}
 .mic-btn.on{
-  transform:scale(1.12);
-  border-color:rgba(172,85,252,.88);
+  background:radial-gradient(ellipse at 42% 30%,rgba(172,85,252,.85),rgba(75,14,145,.98));
+  border-color:rgba(172,85,252,.78);
   box-shadow:
-    0 0 28px rgba(172,85,252,.85),
-    0 0 60px rgba(172,85,252,.50),
-    0 0 100px rgba(172,85,252,.25);
+    0 0 32px rgba(172,85,252,.70),0 0 72px rgba(172,85,252,.34),
+    inset 0 1px 0 rgba(255,255,255,.12),inset 0 0 22px rgba(172,85,252,.22);
   animation:mpulse .9s ease-in-out infinite;
 }
 @keyframes mpulse{
-  0%,100%{
-    box-shadow:
-      0 0 28px rgba(172,85,252,.85),
-      0 0 60px rgba(172,85,252,.50),
-      0 0 100px rgba(172,85,252,.25);
-    transform:scale(1.12);
-  }
-  50%{
-    box-shadow:
-      0 0 42px rgba(172,85,252,1),
-      0 0 90px rgba(172,85,252,.70),
-      0 0 140px rgba(172,85,252,.40);
-    transform:scale(1.16);
-  }
+  0%,100%{box-shadow:0 0 32px rgba(172,85,252,.70),0 0 72px rgba(172,85,252,.34),inset 0 1px 0 rgba(255,255,255,.12),inset 0 0 22px rgba(172,85,252,.22)}
+  50%{box-shadow:0 0 52px rgba(172,85,252,1),0 0 118px rgba(172,85,252,.52),inset 0 1px 0 rgba(255,255,255,.16),inset 0 0 35px rgba(172,85,252,.38)}
 }
 .mic-lbl{
   font-family:'Orbitron',sans-serif;font-size:13px;font-weight:400;
