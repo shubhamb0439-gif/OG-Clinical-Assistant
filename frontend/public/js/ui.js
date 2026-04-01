@@ -1461,48 +1461,37 @@ function setupSR() {
             }
         }
     };
+    let _restartPending = false;
+    function _scheduleRestart(reason) {
+        if (_restartPending || !isListening) return;
+        _restartPending = true;
+        setTimeout(() => {
+            _restartPending = false;
+            if (!isListening || !rec) return;
+            try {
+                rec.start();
+                console.log('[VoiceRec] Auto-restarted after', reason);
+            } catch (e) {
+                console.warn('[VoiceRec] Auto-restart skipped:', e.message);
+            }
+        }, 500);
+    }
     rec.onerror = (ev) => {
         const code = ev?.error || 'unknown';
         console.log('[VoiceRec] Error:', code);
-
-        // Auto-restart on recoverable errors
         if (code === 'aborted' || code === 'no-speech' || code === 'audio-capture' || code === 'network') {
-            if (isListening && rec) {
-                setTimeout(() => {
-                    if (isListening && rec) {
-                        try {
-                            rec.start();
-                            console.log('[VoiceRec] Auto-restarted after', code);
-                        } catch (e) {
-                            console.warn('[VoiceRec] Auto-restart failed:', e.message);
-                        }
-                    }
-                }, 300);
-            }
+            _scheduleRestart(code);
         } else if (code === 'not-allowed' || code === 'service-not-allowed') {
-            // Permission denied - stop listening
             console.error('[VoiceRec] Microphone permission denied');
-            msg('System', '⚠️ Microphone permission denied. Please grant access in settings.');
+            msg('System', 'Microphone permission denied. Please grant access in settings.');
             isListening = false;
-            if (orbUI) orbUI.syncVoiceState(false);
         } else {
             console.warn('[VoiceRec] Unhandled error:', code);
         }
     };
     rec.onend = () => {
         console.log('[VoiceRec] onend fired, isListening:', isListening);
-        if (isListening && rec) {
-            setTimeout(() => {
-                if (isListening && rec) {
-                    try { rec.start(); } catch (e) {
-                        console.warn('[VoiceRec] Restart failed:', e);
-                        setTimeout(() => {
-                            if (isListening && rec) try { rec.start(); } catch { }
-                        }, 500);
-                    }
-                }
-            }, 100);
-        }
+        _scheduleRestart('onend');
     };
     return true;
 }
@@ -1742,20 +1731,17 @@ elBtnVoice.addEventListener('click', () => {
     if (isListening) stopVoiceRecognition(); else startVoiceRecognition();
 });
 
-// Initialize Orb UI Controller
+// orbUI is intentionally null — OrbUIController is not used here.
+// The healthcare UI (device-healthcare-ui.js) calls hiddenVoice.click()
+// which fires the elBtnVoice listener above — single trigger, no duplicates.
 let orbUI = null;
-if (elBtnVoice) {
-    orbUI = new OrbUIController({
-        voiceButton: elBtnVoice,
-        onVoiceToggle: (shouldStart) => {
-            if (shouldStart && !isListening) {
-                startVoiceRecognition();
-            } else if (!shouldStart && isListening) {
-                stopVoiceRecognition();
-            }
-        }
-    });
-}
+
+window._xrToggleVoice = function () {
+    if (!hasDeviceWritePermission()) { notifyReadOnlyDevice(); return; }
+    if (isListening) stopVoiceRecognition(); else startVoiceRecognition();
+};
+
+window._xrIsVoiceListening = function () { return isListening; };
 
 // ===================== Wake Listener removed =====================
 
