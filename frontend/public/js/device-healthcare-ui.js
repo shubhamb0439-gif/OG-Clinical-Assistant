@@ -150,7 +150,6 @@
 
   if (streamPlayBtn) {
     streamPlayBtn.addEventListener('click', function () {
-      closeStreamPopup();
       if (hiddenStream) hiddenStream.click();
     });
   }
