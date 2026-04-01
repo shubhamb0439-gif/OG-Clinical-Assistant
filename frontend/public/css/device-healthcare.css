@@ -269,6 +269,43 @@ html,body{
   color:#dc2626;
 }
 
+.hc-popup-conn-status{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  padding:7px 10px;
+  border-radius:8px;
+  margin-bottom:12px;
+  font-size:13px;
+  font-weight:600;
+}
+
+.hc-popup-conn-status.connected{
+  background:rgba(34,197,94,0.12);
+  color:#16a34a;
+}
+
+.hc-popup-conn-status.disconnected{
+  background:rgba(239,68,68,0.10);
+  color:#dc2626;
+}
+
+.hc-popup-conn-dot{
+  width:8px;height:8px;
+  border-radius:50%;
+  flex-shrink:0;
+}
+
+.hc-popup-conn-status.connected .hc-popup-conn-dot{
+  background:#22c55e;
+  box-shadow:0 0 5px rgba(34,197,94,0.6);
+}
+
+.hc-popup-conn-status.disconnected .hc-popup-conn-dot{
+  background:#ef4444;
+  box-shadow:0 0 5px rgba(239,68,68,0.5);
+}
+
 .hc-popup-btn{
   width:100%;
   padding:10px;
