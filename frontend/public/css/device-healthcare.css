@@ -158,7 +158,8 @@ html,body{
 }
 
 .hc-nav-btn.play-btn{
-  width:80px;height:80px;
+  width:80px !important;
+  height:80px !important;
   background:transparent;
   box-shadow:none;
 }
@@ -227,7 +228,8 @@ html,body{
 }
 
 .hc-nav-btn.msg-btn{
-  width:80px;height:80px;
+  width:80px !important;
+  height:80px !important;
   background:transparent;
   box-shadow:none;
 }
