@@ -158,6 +158,7 @@ html,body{
 }
 
 .hc-nav-btn.play-btn{
+  width:80px;height:80px;
   background:transparent;
   box-shadow:none;
 }
@@ -226,6 +227,7 @@ html,body{
 }
 
 .hc-nav-btn.msg-btn{
+  width:80px;height:80px;
   background:transparent;
   box-shadow:none;
 }
