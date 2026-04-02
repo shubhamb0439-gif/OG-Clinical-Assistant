@@ -157,14 +157,16 @@ html,body{
   transform:scale(0.92);
 }
 
-.hc-nav-btn.play-btn{
+.hc-nav-btn.play-btn,
+.hc-nav-btn.msg-btn{
   width:80px !important;
   height:80px !important;
   background:transparent;
   box-shadow:none;
 }
 
-.hc-nav-btn.play-btn:hover{
+.hc-nav-btn.play-btn:hover,
+.hc-nav-btn.msg-btn:hover{
   box-shadow:none;
   transform:translateY(-2px);
 }
