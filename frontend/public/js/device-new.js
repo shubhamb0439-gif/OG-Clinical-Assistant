@@ -334,6 +334,7 @@ class DeviceApp {
         this.webrtc.attachVideo(this.videoFeed);
         this.isStreaming = true;
         this.startWaveformAnimation();
+        this.updatePlayButtonState(true);
       }
     } catch (err) {
       console.error('[DeviceApp] Failed to start stream:', err);
@@ -346,6 +347,7 @@ class DeviceApp {
         await this.webrtc.stopStreaming();
         this.isStreaming = false;
         this.stopWaveformAnimation();
+        this.updatePlayButtonState(false);
       }
       this.showScreen('home');
     } catch (err) {
@@ -388,6 +390,40 @@ class DeviceApp {
 
   handlePause() {
     this.handleStopStream();
+  }
+
+  updatePlayButtonState(isPlaying) {
+    const playButtons = [
+      this.buttons.play,
+      this.buttons.playMsg
+    ];
+
+    const pauseButtons = [
+      this.buttons.pauseControl
+    ];
+
+    const playImageSrc = '/public/images/play_button.png';
+    const pauseImageSrc = '/public/images/pause_button.png';
+
+    playButtons.forEach(btn => {
+      if (btn) {
+        const img = btn.querySelector('img');
+        if (img) {
+          img.src = isPlaying ? pauseImageSrc : playImageSrc;
+          img.alt = isPlaying ? 'Pause' : 'Play';
+        }
+      }
+    });
+
+    pauseButtons.forEach(btn => {
+      if (btn) {
+        const img = btn.querySelector('img');
+        if (img) {
+          img.src = isPlaying ? pauseImageSrc : playImageSrc;
+          img.alt = isPlaying ? 'Pause' : 'Play';
+        }
+      }
+    });
   }
 
   async handleSendMessage() {

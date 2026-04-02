@@ -448,6 +448,41 @@
         }
       }
     }
+
+    updatePlayPauseButtonImages();
+  }
+
+  function updatePlayPauseButtonImages() {
+    if (!hiddenStream) return;
+
+    var streamText = hiddenStream.textContent.trim().toLowerCase();
+    var isStreaming = streamText.indexOf('stop') >= 0;
+
+    var playImageSrc = '/public/images/play_button.png';
+    var pauseImageSrc = '/public/images/pause_button.png';
+
+    var playButtons = [playBtn, msgPlayBtn];
+    var pauseButtons = [streamPlayBtn];
+
+    playButtons.forEach(function(btn) {
+      if (btn) {
+        var img = btn.querySelector('img');
+        if (img) {
+          img.src = isStreaming ? pauseImageSrc : playImageSrc;
+          img.alt = isStreaming ? 'Pause' : 'Play';
+        }
+      }
+    });
+
+    pauseButtons.forEach(function(btn) {
+      if (btn) {
+        var img = btn.querySelector('img');
+        if (img) {
+          img.src = isStreaming ? pauseImageSrc : playImageSrc;
+          img.alt = isStreaming ? 'Pause' : 'Play';
+        }
+      }
+    });
   }
 
   var soloTranscript = document.getElementById('hcSoloTranscript');
