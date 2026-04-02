@@ -417,7 +417,6 @@ app.get(['/sw.js', '/sw-device.js', '/device/sw.js'], (req, res) => {
 
 // Pretty routes → views
 app.get(['/device', '/device/'], sendView('device-new.html'));
-app.get(['/device-old', '/device-old/'], sendView('device.html'));
 app.get(['/dashboard', '/dashboard/'], sendView('dashboard.html'));
 app.get(['/scribe-cockpit', '/scribe-cockpit/'], sendView('scribe-cockpit.html'));
 app.get(['/operator', '/operator/'], sendView('operator.html'));
