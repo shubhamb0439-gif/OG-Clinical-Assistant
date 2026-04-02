@@ -133,7 +133,23 @@
   if (playBtn) {
     playBtn.addEventListener('click', function () {
       if (hiddenStream) hiddenStream.click();
+      togglePlayPauseButton(playBtn);
     });
+  }
+
+  function togglePlayPauseButton(btn) {
+    var img = btn.querySelector('.btn-icon');
+    if (!img) return;
+
+    if (img.src.includes('play_button.png')) {
+      img.src = '/public/images/pause_button.png';
+      img.alt = 'Pause';
+      btn.title = 'Stop Stream';
+    } else {
+      img.src = '/public/images/play_button.png';
+      img.alt = 'Play';
+      btn.title = 'Start Stream';
+    }
   }
 
   if (orbBtn) {
@@ -152,6 +168,7 @@
   if (streamPlayBtn) {
     streamPlayBtn.addEventListener('click', function () {
       if (hiddenStream) hiddenStream.click();
+      togglePlayPauseButton(streamPlayBtn);
     });
   }
 
@@ -195,6 +212,7 @@
     msgPlayBtn.addEventListener('click', function () {
       closeMsgPopup();
       if (hiddenStream) hiddenStream.click();
+      togglePlayPauseButton(msgPlayBtn);
     });
   }
 
@@ -602,11 +620,33 @@
       var nowActive = newText.indexOf('stop') >= 0;
       if (nowActive) {
         openStreamPopup();
+        updateButtonToState(playBtn, 'pause');
+        updateButtonToState(streamPlayBtn, 'pause');
+        updateButtonToState(msgPlayBtn, 'pause');
       } else {
         closeStreamPopup();
+        updateButtonToState(playBtn, 'play');
+        updateButtonToState(streamPlayBtn, 'play');
+        updateButtonToState(msgPlayBtn, 'play');
       }
     });
     streamObserver.observe(hiddenStream, { childList: true, subtree: true, characterData: true });
+  }
+
+  function updateButtonToState(btn, state) {
+    if (!btn) return;
+    var img = btn.querySelector('.btn-icon');
+    if (!img) return;
+
+    if (state === 'pause') {
+      img.src = '/public/images/pause_button.png';
+      img.alt = 'Pause';
+      btn.title = 'Stop Stream';
+    } else {
+      img.src = '/public/images/play_button.png';
+      img.alt = 'Play';
+      btn.title = 'Start Stream';
+    }
   }
 
   if (hiddenMute) {

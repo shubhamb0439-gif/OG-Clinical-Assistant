@@ -158,17 +158,24 @@ html,body{
 }
 
 .hc-nav-btn.play-btn{
-  background:linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%);
-  box-shadow:0 4px 16px rgba(124,58,237,0.4);
+  background:transparent;
+  box-shadow:none;
 }
 
 .hc-nav-btn.play-btn:hover{
-  box-shadow:0 6px 24px rgba(124,58,237,0.5);
+  box-shadow:none;
   transform:translateY(-2px);
 }
 
 .hc-nav-btn.play-btn svg{
   margin-left:3px;
+}
+
+.hc-nav-btn .btn-icon{
+  width:100%;
+  height:100%;
+  object-fit:contain;
+  pointer-events:none;
 }
 
 .hc-nav-btn.orb-btn{
@@ -219,12 +226,12 @@ html,body{
 }
 
 .hc-nav-btn.msg-btn{
-  background:linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%);
-  box-shadow:0 4px 16px rgba(124,58,237,0.4);
+  background:transparent;
+  box-shadow:none;
 }
 
 .hc-nav-btn.msg-btn:hover{
-  box-shadow:0 6px 24px rgba(124,58,237,0.5);
+  box-shadow:none;
   transform:translateY(-2px);
 }
 
