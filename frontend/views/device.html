@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <title>OG Clinical Assistant</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" />
+    <meta name="theme-color" content="#ffffff" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="light" />
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/public/images/xr-logo-192.png" sizes="192x192" />
+    <link rel="apple-touch-icon" href="/public/images/xr-logo-192.png" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/public/css/device.css" />
+</head>
+
+<body>
+    <div class="shell" id="shell">
+        <div class="screen home-screen active" id="homeScreen">
+            <div class="gradient-purple"></div>
+            <div class="gradient-teal"></div>
+            <div class="frosted-glass-top"></div>
+
+            <div class="profile-icon" id="profileIconBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                    <circle cx="12" cy="7" r="4"></circle>
+                </svg>
+            </div>
+
+            <div class="logo-container">
+                <div class="logo-bubble">
+                    <div class="logo-cross"></div>
+                </div>
+                <div class="logo-text"><span>OG</span> Clinical Assistant</div>
+            </div>
+
+            <div class="bottom-buttons">
+                <div class="btn-avatar" id="playBtn">
+                    <img src="/public/images/play_button.png" alt="Play" style="width: 100%; height: 100%; object-fit: contain;">
+                </div>
+
+                <div class="btn-avatar center" id="centerBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/>
+                        <circle cx="12" cy="12" r="6"/>
+                        <circle cx="12" cy="12" r="2"/>
+                    </svg>
+                </div>
+
+                <div class="btn-avatar" id="messageBtn">
+                    <img src="/public/images/message_button_button.png" alt="Messages" style="width: 100%; height: 100%; object-fit: contain;">
+                </div>
+            </div>
+
+            <div class="frosted-glass-bottom"></div>
+        </div>
+
+        <div class="screen video-screen" id="videoScreen">
+            <div class="gradient-purple"></div>
+            <div class="gradient-teal"></div>
+
+            <div class="video-container">
+                <video id="videoFeed" class="video-feed" autoplay playsinline muted></video>
+            </div>
+
+            <div class="waveform-overlay">
+                <canvas id="waveformCanvas" class="waveform-canvas"></canvas>
+            </div>
+
+            <div class="transcription-overlay" id="transcriptionOverlay">
+                <div class="transcription-text blur" id="transcriptPrev">Hi Goutham</div>
+                <div class="transcription-text current" id="transcriptCurrent">I am Doing Good</div>
+                <div class="transcription-text blur" id="transcriptNext">How are you?</div>
+            </div>
+
+            <div class="frosted-glass-top">
+                <div class="doctor-status">
+                    <span class="doctor-name" id="doctorName">DR John</span>
+                    <div class="status-indicator" id="statusIndicator"></div>
+                </div>
+            </div>
+
+            <div class="controls-pill" id="controlsPill"></div>
+            <div class="controls-buttons" id="controlsButtons">
+                <span class="control-btn-text" id="muteBtn">MUTE</span>
+                <span class="control-btn-text" id="hideBtn">HIDE</span>
+                <span class="control-btn-text" id="pauseBtn">PAUSE</span>
+            </div>
+
+            <div class="bottom-buttons">
+                <div class="btn-avatar" id="pauseControlBtn">
+                    <img src="/public/images/pause_button.png" alt="Pause" style="width: 100%; height: 100%; object-fit: contain;">
+                </div>
+
+                <div class="btn-avatar center" id="centerControlBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/>
+                        <circle cx="12" cy="12" r="6"/>
+                        <circle cx="12" cy="12" r="2"/>
+                    </svg>
+                </div>
+
+                <div class="btn-avatar" id="chatControlBtn">
+                    <img src="/public/images/message_button_button.png" alt="Messages" style="width: 100%; height: 100%; object-fit: contain;">
+                </div>
+            </div>
+
+            <div class="frosted-glass-bottom"></div>
+        </div>
+
+        <div class="screen messages-screen" id="messagesScreen">
+            <div class="gradient-purple"></div>
+            <div class="gradient-teal"></div>
+
+            <div class="frosted-glass-top">
+                <div class="doctor-status">
+                    <span class="doctor-name">DR John</span>
+                    <div class="status-indicator"></div>
+                </div>
+            </div>
+
+            <div class="messages-header">RECENT MESSAGES</div>
+
+            <div class="message-list" id="messageList">
+                <div class="message-item">
+                    <div class="message-sender">Dr Khan</div>
+                    <div class="message-content">Video not streaming.</div>
+                    <div class="message-time">10 mins ago</div>
+                </div>
+                <div class="message-item">
+                    <div class="message-sender">Dr Khan</div>
+                    <div class="message-content">Hi patient how are you?</div>
+                    <div class="message-time">15 mins ago</div>
+                </div>
+                <div class="message-item">
+                    <div class="message-sender">Dr Khan</div>
+                    <div class="message-content">Start stream.</div>
+                    <div class="message-time">20 mins ago</div>
+                </div>
+            </div>
+
+            <div class="message-input-container">
+                <input type="text" class="message-input" id="messageInput" placeholder="Type your message..." />
+                <div class="message-send-btn" id="messageSendBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                    </svg>
+                </div>
+            </div>
+
+            <div class="bottom-buttons">
+                <div class="btn-avatar" id="playBtnMsg">
+                    <img src="/public/images/play_button.png" alt="Play" style="width: 100%; height: 100%; object-fit: contain;">
+                </div>
+
+                <div class="btn-avatar center" id="centerBtnMsg">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="10"/>
+                        <circle cx="12" cy="12" r="6"/>
+                        <circle cx="12" cy="12" r="2"/>
+                    </svg>
+                </div>
+
+                <div class="btn-avatar" id="messageBtnMsg">
+                    <img src="/public/images/message_button_button.png" alt="Messages" style="width: 100%; height: 100%; object-fit: contain;">
+                </div>
+            </div>
+
+            <div class="frosted-glass-bottom"></div>
+        </div>
+
+        <div class="screen profile-screen" id="profileScreen">
+            <div class="gradient-purple"></div>
+            <div class="gradient-teal"></div>
+
+            <div class="frosted-glass-top">
+                <div class="profile-icon" id="closeProfileBtn">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </div>
+            </div>
+
+            <div class="profile-avatar">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                    <circle cx="12" cy="7" r="4"></circle>
+                </svg>
+            </div>
+
+            <div class="profile-info">
+                <div class="profile-doctor-name" id="profileDoctorName">DR John</div>
+                <div class="profile-status" id="profileStatus">Online</div>
+            </div>
+
+            <div class="profile-details">
+                <div class="profile-detail-item">
+                    <span class="profile-detail-label">Role</span>
+                    <span class="profile-detail-value">Assigned Scribe: Goutham</span>
+                </div>
+                <div class="profile-detail-item">
+                    <span class="profile-detail-label">XR ID</span>
+                    <span class="profile-detail-value" id="profileXrId">-</span>
+                </div>
+            </div>
+
+            <button class="profile-logout-btn" id="profileLogoutBtn">
+                Log Out
+            </button>
+
+            <div class="frosted-glass-bottom"></div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/public/js/config.js"></script>
+    <script type="module" src="/public/js/device-app.js"></script>
+
+    <script>
+        async function maybeRegisterSW() {
+            if (!('serviceWorker' in navigator)) return;
+            if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') return;
+            if (!location.pathname.startsWith('/device')) return;
+            try {
+                const response = await fetch('/device/sw.js', { method: 'HEAD' });
+                if (response.status !== 200) return;
+                const registration = await navigator.serviceWorker.register('/device/sw.js', { scope: '/device/' });
+                console.log('[SW] Registered successfully', registration.scope);
+            } catch (err) {
+                console.warn('[SW] Registration failed:', err.message);
+            }
+        }
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', maybeRegisterSW);
+        } else {
+            maybeRegisterSW();
+        }
+    </script>
+
+    <script>
+        (function () {
+            function handleXrLogout() {
+                console.log('[DEVICE] Platform logout detected, closing tab');
+                try { window.close(); } catch (e) { }
+                setTimeout(function () { window.location.href = '/platform'; }, 300);
+            }
+
+            try {
+                if (typeof BroadcastChannel !== 'undefined') {
+                    var ch = new BroadcastChannel('xr_platform_auth');
+                    ch.onmessage = function (e) {
+                        if (e.data && e.data.type === 'xr_logout') handleXrLogout();
+                    };
+                } else {
+                    window.addEventListener('storage', function (e) {
+                        if (e.key === 'xr_logout_signal') handleXrLogout();
+                    });
+                }
+            } catch (err) {
+                console.warn('[DEVICE] Logout listener setup failed:', err);
+            }
+        })();
+    </script>
+
+    <script>
+        (function () {
+            fetch('/api/platform/me', {
+                method: 'GET',
+                credentials: 'include',
+                cache: 'no-store',
+                headers: { 'Accept': 'application/json', 'Cache-Control': 'no-cache' }
+            }).then(function (res) {
+                if (res.status === 401 || res.status === 403) {
+                    console.log('[DEVICE] Not authenticated, redirecting to login');
+                    history.replaceState(null, '', '/platform');
+                    window.location.replace('/platform');
+                }
+            }).catch(function () {
+                console.warn('[DEVICE] Session check failed, redirecting to login');
+                history.replaceState(null, '', '/platform');
+                window.location.replace('/platform');
+            });
+        })();
+    </script>
+</body>
+
+</html>
